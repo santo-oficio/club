@@ -54,6 +54,10 @@ var MexClub = (function () {
             Familias.load();
         });
 
+        $("#searchFamilias").on("input", debounce(function () {
+            Familias._render();
+        }, 300));
+
         $("#articulosToggleActivos").on("change", function () {
             Articulos.load();
         });
@@ -1026,7 +1030,7 @@ var MexClub = (function () {
             var items = Articulos._allItems;
             if (search) {
                 items = items.filter(function (a) {
-                    return (a.nombre || "").toLowerCase().indexOf(search) >= 0;
+                    return (a.nombre || "").toLowerCase().startsWith(search);
                 });
             }
             if (!items.length) {
@@ -1752,31 +1756,47 @@ var MexClub = (function () {
     var _editFamiliaDescuento = null;
 
     var Familias = {
+        _allItems: [],
+
         load: function () {
             var soloActivas = $("#familiasToggleActivas").is(":checked");
             MexClubApi.getFamilias(soloActivas ? true : false)
                 .then(function (res) {
                     if (!res.success) return;
-                    var items = res.data || [];
-                    if (!items.length) {
-                        $("#listFamiliasPage").html(emptyState("Sin familias", "tags"));
-                        return;
-                    }
-                    var html = items.map(function (f) {
-                        var inactive = !f.isActive;
-                        var cls = inactive ? ' opacity-50' : '';
-                        var badge = '';
-                        if (inactive) badge += '<span class="badge bg-secondary">Inactiva</span>';
-                        return '<a class="list-group-item list-group-item-action' + cls + '" data-action="familia-edit" data-id="' + f.id + '" data-familia-id="' + f.id + '">'
-                            + '<div class="d-flex align-items-center gap-2">'
-                            + letterAvatar(f.nombre)
-                            + '<div class="flex-grow-1 min-width-0"><div class="fw-semibold text-truncate">' + escapeHtml(f.nombre) + '</div></div>'
-                            + badge
-                            + '<i class="bi bi-chevron-right text-muted"></i></div></a>';
-                    }).join("");
-                    $("#listFamiliasPage").html(html);
+                    Familias._allItems = res.data || [];
+                    Familias._render();
                 })
                 .catch(noop);
+        },
+
+        _render: function () {
+            var search = ($("#searchFamilias").val() || "").trim().toLowerCase();
+            var items = Familias._allItems;
+
+            if (search) {
+                items = items.filter(function (f) {
+                    return (f.nombre || "").toLowerCase().startsWith(search);
+                });
+            }
+
+            if (!items.length) {
+                $("#listFamiliasPage").html(emptyState("Sin familias", "tags"));
+                return;
+            }
+
+            var html = items.map(function (f) {
+                var inactive = !f.isActive;
+                var cls = inactive ? ' opacity-50' : '';
+                var badge = '';
+                if (inactive) badge += '<span class="badge bg-secondary">Inactiva</span>';
+                return '<a class="list-group-item list-group-item-action' + cls + '" data-action="familia-edit" data-id="' + f.id + '" data-familia-id="' + f.id + '">'
+                    + '<div class="d-flex align-items-center gap-2">'
+                    + letterAvatar(f.nombre)
+                    + '<div class="flex-grow-1 min-width-0"><div class="fw-semibold text-truncate">' + escapeHtml(f.nombre) + '</div></div>'
+                    + badge
+                    + '<i class="bi bi-chevron-right text-muted"></i></div></a>';
+            }).join("");
+            $("#listFamiliasPage").html(html);
         },
 
         showEdit: function (id) {
