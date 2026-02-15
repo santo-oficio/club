@@ -1,0 +1,14 @@
+.vs/
+bin/
+obj/
+*.user
+*.suo
+*.log
+_ReSharper*/
+packages/
+TestResults/
+.idea/
+.vscode/
+*.db
+*.lock
+*.pdb

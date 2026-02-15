@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#1a1a2e">
+    <meta name="description" content="MexClub - Sistema de Gestión">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="MexClub">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
+    <title>MexClub</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <link href="css/app.css" rel="stylesheet">
+    <link rel="manifest" href="manifest.json">
+</head>
+<body>
+    <!-- Login Screen -->
+    <div id="loginScreen" class="screen active">
+        <div class="login-container">
+            <div class="login-header">
+                <div class="logo-placeholder" id="logoArea">
+                    <i class="bi bi-shield-lock-fill"></i>
+                </div>
+                <h1 class="app-title" id="appTitle">MexClub</h1>
+                <p class="app-subtitle">Sistema de Gestión</p>
+            </div>
+            <form id="loginForm" class="login-form" autocomplete="off">
+                <div class="form-floating mb-3">
+                    <input type="text" class="form-control" id="loginUsername" placeholder="Usuario" required autofocus>
+                    <label for="loginUsername"><i class="bi bi-person"></i> Usuario</label>
+                </div>
+                <div class="form-floating mb-3">
+                    <input type="password" class="form-control" id="loginPassword" placeholder="Contraseña" required>
+                    <label for="loginPassword"><i class="bi bi-lock"></i> Contraseña</label>
+                </div>
+                <button type="submit" class="btn btn-primary btn-lg w-100" id="btnLogin">
+                    <span class="spinner-border spinner-border-sm d-none" id="loginSpinner"></span>
+                    Iniciar Sesión
+                </button>
+                <div class="alert alert-danger mt-3 d-none" id="loginError"></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Main App -->
+    <div id="appScreen" class="screen">
+        <!-- Sidebar Overlay -->
+        <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-brand">
+                    <i class="bi bi-shield-check"></i> MexClub
+                </div>
+                <div class="sidebar-user">
+                    <i class="bi bi-person-circle"></i> <span id="sidebarUser"></span>
+                </div>
+            </div>
+            <nav class="sidebar-nav">
+                <div class="sidebar-section">Principal</div>
+                <a class="sidebar-link active" data-page="pageDashboard">
+                    <i class="bi bi-speedometer2"></i> Panel Principal
+                </a>
+
+                <div class="sidebar-section">Socios</div>
+                <a class="sidebar-link" data-page="pageSocios">
+                    <i class="bi bi-people-fill"></i> Gestión de Socios
+                </a>
+
+                <div class="sidebar-section">Operaciones</div>
+                <a class="sidebar-link" data-page="pageAportaciones">
+                    <i class="bi bi-piggy-bank-fill"></i> Aportaciones
+                </a>
+                <a class="sidebar-link" data-page="pageRetiradas">
+                    <i class="bi bi-cart-dash-fill"></i> Retiradas / Consumiciones
+                </a>
+                <a class="sidebar-link" data-page="pageCuotas">
+                    <i class="bi bi-calendar-check-fill"></i> Cuotas
+                </a>
+
+                <div class="sidebar-section">Catálogo</div>
+                <a class="sidebar-link" data-page="pageArticulos">
+                    <i class="bi bi-box-seam-fill"></i> Artículos
+                </a>
+                <a class="sidebar-link" data-page="pageFamilias">
+                    <i class="bi bi-tags-fill"></i> Familias
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <button class="btn btn-outline-danger btn-sm w-100" id="btnLogout" title="Cerrar sesión">
+                    <i class="bi bi-box-arrow-left me-1"></i> Cerrar Sesión
+                </button>
+            </div>
+        </aside>
+
+        <!-- Top Navbar -->
+        <nav class="app-navbar" id="appNavbar">
+            <button class="navbar-toggler" id="btnToggleSidebar" title="Menú">
+                <i class="bi bi-list"></i>
+            </button>
+            <button class="d-none" id="btnBack" title="Volver">
+                <i class="bi bi-arrow-left"></i>
+            </button>
+            <span class="navbar-title" id="navTitle">Panel Principal</span>
+            <span class="badge bg-light text-dark navbar-user" id="navUser"></span>
+        </nav>
+
+        <!-- Content Area -->
+        <main class="app-content" id="appContent">
+            <!-- Dashboard -->
+            <div id="pageDashboard" class="page active">
+                <div class="row g-3 mb-3">
+                    <div class="col-6 col-md-3">
+                        <div class="stat-card stat-primary">
+                            <i class="bi bi-people-fill"></i>
+                            <div class="stat-value" id="statSocios">-</div>
+                            <div class="stat-label">Socios Activos</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="stat-card stat-success">
+                            <i class="bi bi-door-open-fill"></i>
+                            <div class="stat-value" id="statDentro">-</div>
+                            <div class="stat-label">Visitas Hoy</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="stat-card stat-info">
+                            <i class="bi bi-piggy-bank-fill"></i>
+                            <div class="stat-value" id="statAportaciones">-</div>
+                            <div class="stat-label">Aportaciones</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="stat-card stat-warning">
+                            <i class="bi bi-cart-dash-fill"></i>
+                            <div class="stat-value" id="statRetiradas">-</div>
+                            <div class="stat-label">Retiradas</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <div class="card h-100">
+                            <div class="card-header d-flex align-items-center gap-2">
+                                <i class="bi bi-clock-history text-primary"></i> Últimos Accesos
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="list-group list-group-flush scrollable-list" id="listUltimosAccesos">
+                                    <div class="empty-placeholder"><i class="bi bi-hourglass"></i><span>Cargando...</span></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card h-100">
+                            <div class="card-header d-flex align-items-center gap-2">
+                                <i class="bi bi-piggy-bank text-success"></i> Últimas Aportaciones
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="list-group list-group-flush scrollable-list" id="listUltimasAportaciones">
+                                    <div class="empty-placeholder"><i class="bi bi-hourglass"></i><span>Cargando...</span></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card h-100">
+                            <div class="card-header d-flex align-items-center gap-2">
+                                <i class="bi bi-cart-dash text-danger"></i> Últimas Retiradas
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="list-group list-group-flush scrollable-list" id="listUltimasRetiradas">
+                                    <div class="empty-placeholder"><i class="bi bi-hourglass"></i><span>Cargando...</span></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Socios Page -->
+            <div id="pageSocios" class="page">
+                <div class="page-toolbar">
+                    <div class="input-group">
+                        <input type="text" class="form-control" id="searchSocios" placeholder="Buscar por nombre, código o documento...">
+                        <span class="input-group-text"><i class="bi bi-search"></i></span>
+                    </div>
+                    <button class="btn btn-primary admin-only" data-action="socio-create">
+                        <i class="bi bi-person-plus-fill me-1"></i> Nuevo Socio
+                    </button>
+                </div>
+                <div id="listSocios" class="list-group card"></div>
+                <div class="text-center mt-3">
+                    <button class="btn btn-outline-secondary btn-sm d-none" id="btnLoadMoreSocios" onclick="MexClub.Socios.loadMore()">
+                        <i class="bi bi-arrow-down-circle me-1"></i> Cargar más
+                    </button>
+                </div>
+            </div>
+
+            <!-- Fichaje Page -->
+            <div id="pageFichaje" class="page">
+                <div class="card mb-3">
+                    <div class="card-body">
+                        <div class="input-group input-group-lg">
+                            <span class="input-group-text"><i class="bi bi-upc-scan"></i></span>
+                            <input type="text" class="form-control" id="fichajeCodigo" placeholder="Escanear o escribir código de socio...">
+                            <button class="btn btn-success" onclick="MexClub.Fichaje.fichar()">
+                                <i class="bi bi-check-circle me-1"></i> Fichar
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="alert d-none" id="fichajeResult"></div>
+                <div id="fichajeSocioInfo" class="socio-lookup-card d-none mb-3"></div>
+                <div class="card">
+                    <div class="card-header d-flex align-items-center gap-2">
+                        <i class="bi bi-clock-history text-primary"></i> Accesos de Hoy
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="list-group list-group-flush scrollable-list" id="listAccesosHoy">
+                            <div class="empty-placeholder"><i class="bi bi-emoji-smile"></i><span>Sin accesos todavía</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Artículos Page -->
+            <div id="pageArticulos" class="page">
+                <div class="page-toolbar">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="articulosToggleActivos" checked>
+                        <label class="form-check-label" for="articulosToggleActivos">Solo activos</label>
+                    </div>
+                    <button class="btn btn-primary admin-only ms-auto" data-action="articulo-create">
+                        <i class="bi bi-plus-lg me-1"></i> Nuevo Artículo
+                    </button>
+                </div>
+                <div class="page-toolbar">
+                    <div class="input-group">
+                        <span class="input-group-text"><i class="bi bi-search"></i></span>
+                        <input type="text" class="form-control" id="searchArticulos" placeholder="Buscar artículo...">
+                    </div>
+                    <select class="form-select filter-select" id="filterFamiliaArticulos" title="Filtrar por familia">
+                        <option value="">Todas las familias</option>
+                    </select>
+                </div>
+                <div id="listArticulosPage" class="list-group card"></div>
+            </div>
+
+            <!-- Familias Page (standalone from sidebar) -->
+            <div id="pageFamilias" class="page">
+                <div class="page-toolbar">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="familiasToggleActivas" checked>
+                        <label class="form-check-label" for="familiasToggleActivas">Solo activas</label>
+                    </div>
+                    <button class="btn btn-primary admin-only ms-auto" data-action="familia-create">
+                        <i class="bi bi-plus-lg me-1"></i> Nueva Familia
+                    </button>
+                </div>
+                <div id="listFamiliasPage" class="list-group card"></div>
+            </div>
+
+            <!-- Aportaciones Page -->
+            <div id="pageAportaciones" class="page">
+                <div class="page-toolbar">
+                    <div class="socio-autocomplete-wrap">
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="apoBuscar" placeholder="Nombre, código o documento..." autocomplete="off">
+                            <button class="btn btn-primary" id="btnApoBuscar" title="Buscar socio"><i class="bi bi-search"></i></button>
+                        </div>
+                        <div class="socio-autocomplete-list d-none" id="apoAutocomplete"></div>
+                    </div>
+                </div>
+                <div id="apoSocioCard" class="d-none">
+                    <!-- Socio header card -->
+                    <div class="card mb-3">
+                        <div class="card-body">
+                            <div class="d-flex align-items-center gap-3">
+                                <div id="apoAvatar"></div>
+                                <div class="flex-grow-1 min-width-0">
+                                    <h5 class="mb-0 text-truncate" id="apoNombre"></h5>
+                                    <span class="badge bg-secondary mt-1" id="apoNumSocio"></span>
+                                    <span class="badge mt-1" id="apoInfo"></span>
+                                    <div id="apoEstrellas" class="cuota-stars mt-1"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Financial stat cards -->
+                    <div class="row g-2 mb-3">
+                        <div class="col-4">
+                            <div class="stat-card stat-success">
+                                <i class="bi bi-wallet2"></i>
+                                <div class="stat-value" id="apoAprovechable">-</div>
+                                <div class="stat-label">Aprovechable</div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="stat-card stat-info">
+                                <i class="bi bi-speedometer2"></i>
+                                <div class="stat-value" id="apoLimite">-</div>
+                                <div class="stat-label">Límite Mensual</div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="stat-card stat-warning">
+                                <i class="bi bi-graph-down"></i>
+                                <div class="stat-value" id="apoConsumido">-</div>
+                                <div class="stat-label">Consumido Mes</div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Detail info card -->
+                    <div class="card mb-3">
+                        <div class="card-body p-0">
+                            <div class="row g-2 p-3" id="apoInfoRows"></div>
+                        </div>
+                    </div>
+                    <!-- Aportación input + button -->
+                    <div class="card mb-3 admin-only">
+                        <div class="card-body">
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-cash-coin"></i></span>
+                                <input type="number" class="form-control" id="apoCantidad" placeholder="Cantidad a aportar" min="1">
+                                <button class="btn btn-success" id="btnAportar" disabled>
+                                    <i class="bi bi-piggy-bank me-1"></i> Aportar
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- No encontrado message -->
+                <div id="apoNoEncontrado" class="d-none"></div>
+                <!-- Recent aportaciones for this socio -->
+                <div id="apoRecientesWrap" class="d-none">
+                    <h6 class="text-muted mb-2"><i class="bi bi-clock-history me-1"></i>Últimas aportaciones</h6>
+                    <div id="listAportaciones" class="list-group card"></div>
+                </div>
+            </div>
+
+            <!-- Retiradas Page -->
+            <div id="pageRetiradas" class="page">
+                <div class="page-toolbar">
+                    <div></div>
+                    <button class="btn btn-primary admin-only" data-action="retirada-create">
+                        <i class="bi bi-cart-dash me-1"></i> Nueva Retirada
+                    </button>
+                </div>
+                <div id="listRetiradas" class="list-group card"></div>
+                <div class="text-center mt-3">
+                    <button class="btn btn-outline-secondary btn-sm d-none" id="btnLoadMoreRetiradas" data-action="retirada-load-more">
+                        <i class="bi bi-arrow-down-circle me-1"></i> Cargar más
+                    </button>
+                </div>
+            </div>
+
+            <!-- Cuotas Page -->
+            <div id="pageCuotas" class="page">
+                <div class="page-toolbar">
+                    <div class="socio-autocomplete-wrap">
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="cuotaBuscar" placeholder="Nombre, código o documento..." autocomplete="off">
+                            <button class="btn btn-primary" id="btnCuotaBuscar" title="Buscar socio"><i class="bi bi-search"></i></button>
+                        </div>
+                        <div class="socio-autocomplete-list d-none" id="cuotaAutocomplete"></div>
+                    </div>
+                </div>
+                <div id="cuotaSocioCard" class="d-none">
+                    <!-- Socio header card -->
+                    <div class="card mb-3">
+                        <div class="card-body">
+                            <div class="d-flex align-items-center gap-3">
+                                <div id="cuotaAvatar"></div>
+                                <div class="flex-grow-1 min-width-0">
+                                    <h5 class="mb-0 text-truncate" id="cuotaNombre"></h5>
+                                    <span class="badge bg-secondary mt-1" id="cuotaNumSocio"></span>
+                                    <span class="badge mt-1" id="cuotaInfo"></span>
+                                    <div id="cuotaEstrellas" class="cuota-stars mt-1"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Financial stat cards -->
+                    <div class="row g-2 mb-3">
+                        <div class="col-4">
+                            <div class="stat-card stat-success">
+                                <i class="bi bi-wallet2"></i>
+                                <div class="stat-value" id="cuotaAprovechable">-</div>
+                                <div class="stat-label">Aprovechable</div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="stat-card stat-info">
+                                <i class="bi bi-speedometer2"></i>
+                                <div class="stat-value" id="cuotaLimite">-</div>
+                                <div class="stat-label">Límite Mensual</div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="stat-card stat-warning">
+                                <i class="bi bi-graph-down"></i>
+                                <div class="stat-value" id="cuotaConsumido">-</div>
+                                <div class="stat-label">Consumido Mes</div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Detail info card -->
+                    <div class="card mb-3">
+                        <div class="card-body p-0">
+                            <div class="row g-2 p-3" id="cuotaInfoRows"></div>
+                        </div>
+                    </div>
+                    <!-- Status message (al día / exento) -->
+                    <div id="cuotaStatusMsg" class="d-none"></div>
+                    <!-- Payment buttons -->
+                    <div id="cuotaBotonesWrap" class="d-flex justify-content-center gap-3">
+                        <button class="btn btn-lg cuota-btn-anual" id="btnCuotaAnual" disabled>
+                            <i class="bi bi-calendar-range me-1"></i><span class="cuota-btn-label">50</span>
+                            <small class="d-block cuota-btn-sub">Anual</small>
+                        </button>
+                        <button class="btn btn-lg cuota-btn-mensual" id="btnCuotaMensual" disabled>
+                            <i class="bi bi-calendar-month me-1"></i><span class="cuota-btn-label">10</span>
+                            <small class="d-block cuota-btn-sub">Mensual</small>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Generic Modal -->
+    <div class="modal fade" id="genericModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="modalTitle"></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+                </div>
+                <div class="modal-body" id="modalBody"></div>
+                <div class="modal-footer" id="modalFooter"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast-container position-fixed bottom-0 end-0 p-3 toast-wrapper">
+        <div class="toast" id="appToast" role="alert">
+            <div class="toast-header">
+                <strong class="me-auto" id="toastTitle"></strong>
+                <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Cerrar"></button>
+            </div>
+            <div class="toast-body" id="toastBody"></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+    <script src="js/config.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/app.js"></script>
+    <script>
+    if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.register("/sw.js").then(function(reg) {
+            console.log("SW registrado:", reg.scope);
+        }).catch(function(err) {
+            console.warn("SW error:", err);
+        });
+    }
+    </script>
+</body>
+</html>
