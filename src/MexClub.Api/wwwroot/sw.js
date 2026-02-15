@@ -1,4 +1,4 @@
-var CACHE_NAME = "mexclub-v31";
+var CACHE_NAME = "mexclub-v32";
 var STATIC_ASSETS = [
     "/",
     "/index.html",

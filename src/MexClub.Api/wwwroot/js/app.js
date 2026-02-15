@@ -901,6 +901,7 @@ var MexClub = (function () {
                         + infoRow("Dirección", [s.direccion, s.localidad, s.provincia].filter(Boolean).join(", "), "geo-alt")
                         + infoRow("F. Nacimiento", formatDate(s.fechaNacimiento), "calendar-heart")
                         + infoRow("F. Alta", formatDate(s.fechaAlta), "calendar-check")
+                        + infoRow("Referido Por", s.referidoPorCodigo, "people")
                         + infoRow("Aprovechable", formatCurrency(d.aprovechable), "wallet2")
                         + infoRow("Consumo Mes", formatCurrency(d.consumicionDelMes), "graph-down")
                         + infoRow("Próxima Cuota", s.esExento ? "Exento de cuota" : formatDate(d.cuotaFechaProxima), "calendar-event")
