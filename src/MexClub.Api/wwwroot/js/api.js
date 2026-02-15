@@ -150,15 +150,14 @@ var MexClubApi = (function () {
         deactivateSocio: function (id) { return request("DELETE", "/socios/" + id); },
         getReferidos: function (codigo) { return request("GET", "/socios/referidos/" + encodeURIComponent(codigo)); },
         uploadSocioImages: function (socioId, formData) {
-            var auth = loadAuth() ? sessionStorage.getItem("mexclub_auth") : null;
-            var token = auth ? JSON.parse(auth).token : null;
+            if (!_token) loadAuth();
             return $.ajax({
                 url: _baseUrl + "/socios/" + socioId + "/upload",
                 type: "POST",
                 data: formData,
                 processData: false,
                 contentType: false,
-                headers: token ? { "Authorization": "Bearer " + token } : {}
+                headers: _token ? { "Authorization": "Bearer " + _token } : {}
             });
         },
 

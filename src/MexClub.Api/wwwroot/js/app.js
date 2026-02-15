@@ -223,10 +223,6 @@ var MexClub = (function () {
             $("#statAportaciones").text(formatCurrency(d.totalAportaciones));
             $("#statRetiradas").text(formatCurrency(d.totalRetiradas));
 
-            $("#listUltimosAccesos").html(
-                accesos.length ? renderAccesosList(accesos) : emptyState("Sin accesos hoy", "door-open")
-            );
-
             var aportaciones = d.ultimasAportaciones || [];
             $("#listUltimasAportaciones").html(
                 aportaciones.length ? aportaciones.map(renderAportacionItem).join("") : emptyState("Sin aportaciones recientes", "piggy-bank")
@@ -474,7 +470,7 @@ var MexClub = (function () {
             + renderSocioAvatar(a.socioNombre, a.socioFotoUrl)
             + '<div class="flex-grow-1 min-width-0">'
             + '<div class="fw-semibold text-truncate">' + escapeHtml(a.socioNombre) + '</div>'
-            + '<small class="text-muted">#' + a.socioNumSocio + ' &bull; ' + escapeHtml(a.socioDocumento) + ' &bull; ' + formatDateTime(a.fecha) + '</small>'
+            + '<small class="text-muted">' + escapeHtml(a.socioDocumento) + ' &bull; ' + formatDateTime(a.fecha) + '</small>'
             + '</div>'
             + '<span class="fw-bold text-success text-nowrap">+' + formatCurrency(a.cantidadAportada) + '</span>'
             + '</div></div>';
@@ -486,7 +482,7 @@ var MexClub = (function () {
             + renderSocioAvatar(r.socioNombre, r.socioFotoUrl)
             + '<div class="flex-grow-1 min-width-0">'
             + '<div class="fw-semibold text-truncate">' + escapeHtml(r.socioNombre) + '</div>'
-            + '<small class="text-muted">#' + r.socioNumSocio + ' &bull; ' + escapeHtml(r.articuloNombre) + ' x' + r.cantidad + '</small>'
+            + '<small class="text-muted">' + escapeHtml(r.articuloNombre) + ' x' + r.cantidad + '</small>'
             + '<br><small class="text-muted">' + formatDateTime(r.fecha) + '</small>'
             + '</div>'
             + '<span class="fw-bold text-danger text-nowrap">-' + formatCurrency(r.total) + '</span>'
@@ -769,19 +765,74 @@ var MexClub = (function () {
         };
     }
 
+    function compressImage(file, maxWidth, quality) {
+        return new Promise(function (resolve, reject) {
+            if (!file || !file.type.match(/image.*/)) {
+                resolve({ blob: file, name: file ? file.name : "" });
+                return;
+            }
+
+            var reader = new FileReader();
+            reader.onload = function (e) {
+                var img = new Image();
+                img.onload = function () {
+                    var width = img.width;
+                    var height = img.height;
+
+                    if (width > maxWidth) {
+                        height = Math.round(height * (maxWidth / width));
+                        width = maxWidth;
+                    }
+
+                    var canvas = document.createElement('canvas');
+                    canvas.width = width;
+                    canvas.height = height;
+                    var ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+
+                    canvas.toBlob(function (blob) {
+                        if (blob) {
+                            resolve({ blob: blob, name: file.name });
+                        } else {
+                            resolve({ blob: file, name: file.name });
+                        }
+                    }, 'image/jpeg', quality);
+                };
+                img.onerror = function () { resolve({ blob: file, name: file.name }); };
+                img.src = e.target.result;
+            };
+            reader.onerror = function () { resolve({ blob: file, name: file.name }); };
+            reader.readAsDataURL(file);
+        });
+    }
+
     function uploadSocioFiles(socioId) {
-        var fd = new FormData();
-        var hasFiles = false;
         var fotoFile = document.getElementById("socFoto").files[0];
         var anvFile = document.getElementById("socDniAnverso").files[0];
         var revFile = document.getElementById("socDniReverso").files[0];
-        if (fotoFile) { fd.append("foto", fotoFile); hasFiles = true; }
-        if (anvFile) { fd.append("dniAnverso", anvFile); hasFiles = true; }
-        if (revFile) { fd.append("dniReverso", revFile); hasFiles = true; }
-        if (hasFiles) {
-            return MexClubApi.uploadSocioImages(socioId, fd);
+
+        if (!fotoFile && !anvFile && !revFile) {
+            return $.Deferred().resolve().promise();
         }
-        return $.Deferred().resolve().promise();
+
+        var tasks = [];
+        function addTask(key, file) {
+            return compressImage(file, 1280, 0.7).then(function (res) {
+                return { key: key, val: res };
+            });
+        }
+
+        if (fotoFile) tasks.push(addTask("foto", fotoFile));
+        if (anvFile) tasks.push(addTask("dniAnverso", anvFile));
+        if (revFile) tasks.push(addTask("dniReverso", revFile));
+
+        return Promise.all(tasks).then(function (results) {
+            var fd = new FormData();
+            results.forEach(function (item) {
+                fd.append(item.key, item.val.blob, item.val.name);
+            });
+            return MexClubApi.uploadSocioImages(socioId, fd);
+        });
     }
 
     // ========== SOCIOS ==========
@@ -1897,6 +1948,9 @@ var MexClub = (function () {
         Familias: Familias,
         Aportaciones: Aportaciones,
         Cuotas: Cuotas,
-        Retiradas: Retiradas
+        Retiradas: Retiradas,
+        utils: {
+            compressImage: compressImage
+        }
     };
 })();
