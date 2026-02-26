@@ -159,7 +159,7 @@ public class SociosController : ControllerBase
             CodigoPostal = request.CodigoPostal,
             Telefono = request.Telefono,
             Email = request.Email,
-            FechaNacimiento = request.FechaNacimiento,
+            FechaNacimiento = EnsureUtc(request.FechaNacimiento),
             FechaAlta = DateTime.UtcNow,
             Estrellas = request.Estrellas,
             ConsumicionMaximaMensual = request.ConsumicionMaximaMensual,
@@ -206,7 +206,7 @@ public class SociosController : ControllerBase
         socio.CodigoPostal = request.CodigoPostal;
         socio.Telefono = request.Telefono;
         socio.Email = request.Email;
-        socio.FechaNacimiento = request.FechaNacimiento;
+        socio.FechaNacimiento = EnsureUtc(request.FechaNacimiento);
         socio.Estrellas = request.Estrellas;
         socio.ConsumicionMaximaMensual = request.ConsumicionMaximaMensual;
         socio.EsTerapeutica = request.EsTerapeutica;
@@ -309,4 +309,10 @@ public class SociosController : ControllerBase
             s.Detalle.ExentoCuota, s.Detalle.DebeCuota, s.Detalle.Aprovechable
         ) : null
     );
+
+    private static DateTime? EnsureUtc(DateTime? dt)
+    {
+        if (!dt.HasValue) return null;
+        return DateTime.SpecifyKind(dt.Value, DateTimeKind.Utc);
+    }
 }

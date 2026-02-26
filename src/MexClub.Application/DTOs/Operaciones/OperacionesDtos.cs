@@ -44,6 +44,7 @@ public record CreateRetiradaListRequest(
     long SocioId,
     long UsuarioId,
     string? FirmaBase64,
+    bool PermitirExcesoLimiteMensual,
     List<RetiradaItemRequest> Items
 );
 

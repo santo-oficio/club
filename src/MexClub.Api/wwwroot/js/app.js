@@ -6,6 +6,8 @@ var MexClub = (function () {
     var _retiradasPage = 1;
     var _retiradasHasMore = false;
     var _fichajeTimer = null;
+    var _dashboardHoldTimer = null;
+    var _dashboardHoldMs = 800;
 
     // ========== INIT & EVENTS ==========
     function init() {
@@ -131,7 +133,6 @@ var MexClub = (function () {
                 case "socio-do-create": Socios.doCreate(); break;
                 case "aportacion-delete": Aportaciones.confirmDelete(id); break;
                 case "retirada-create": Retiradas.showCreate(); break;
-                case "retirada-do-create": Retiradas.doCreate(); break;
                 case "retirada-load-more": Retiradas.loadMore(); break;
                 case "articulo-detail": Articulos.showDetail(id); break;
                 case "articulo-edit": Articulos.showEdit(id); break;
@@ -143,6 +144,71 @@ var MexClub = (function () {
                 case "familia-edit": Familias.showEdit(id); break;
                 case "familia-do-edit": Familias.doEdit(); break;
             }
+        });
+
+        bindDashboardLongPressEvents();
+    }
+
+    function bindDashboardLongPressEvents() {
+        function clearTimer() {
+            if (_dashboardHoldTimer) {
+                clearTimeout(_dashboardHoldTimer);
+                _dashboardHoldTimer = null;
+            }
+        }
+
+        $(document).on("contextmenu", ".js-dashboard-delete-item", function (e) {
+            e.preventDefault();
+        });
+
+        $(document).on("mousedown touchstart", ".js-dashboard-delete-item", function () {
+            var $item = $(this);
+            clearTimer();
+            _dashboardHoldTimer = setTimeout(function () {
+                $item.data("hold-fired", true);
+                showDashboardDeleteConfirm($item.data("kind"), parseInt($item.data("id"), 10));
+            }, _dashboardHoldMs);
+        });
+
+        $(document).on("mouseup mouseleave touchend touchcancel", ".js-dashboard-delete-item", function () {
+            clearTimer();
+        });
+
+        $(document).on("click", ".js-dashboard-delete-item", function (e) {
+            if ($(this).data("hold-fired")) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                $(this).data("hold-fired", false);
+            }
+        });
+    }
+
+    function showDashboardDeleteConfirm(kind, id) {
+        if (!(id > 0)) return;
+
+        var isAportacion = kind === "aportacion";
+        var title = isAportacion ? "Eliminar aportación" : "Eliminar retirada";
+        var body = isAportacion
+            ? '<p class="mb-0">¿Quieres borrar esta aportación? Se descontará del disponible del socio.</p>'
+            : '<p class="mb-0">¿Quieres borrar esta retirada? Se recalcularán disponible y consumido del socio.</p>';
+        var footer = '<button class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>'
+            + '<button class="btn btn-danger" id="btnConfirmDashboardDelete">Sí, borrar</button>';
+
+        showModal(title, body, footer);
+
+        $(document).off("click.dashboard-delete", "#btnConfirmDashboardDelete").on("click.dashboard-delete", "#btnConfirmDashboardDelete", function () {
+            var req = isAportacion ? MexClubApi.deleteAportacion(id) : MexClubApi.deleteRetirada(id);
+            req.then(function (res) {
+                if (res && res.success) {
+                    closeModal();
+                    showToast("OK", isAportacion ? "Aportación eliminada" : "Retirada eliminada", "success");
+                    loadDashboard();
+                } else {
+                    showToast("Error", (res && res.message) ? res.message : "No se pudo eliminar", "danger");
+                }
+            }).catch(function (err) {
+                showToast("Error", err && err.message ? err.message : "No se pudo eliminar", "danger");
+            });
         });
     }
 
@@ -218,8 +284,7 @@ var MexClub = (function () {
             if (!res.success) return;
             var d = res.data;
             $("#statSocios").text(d.totalSociosActivos);
-            var accesos = d.ultimosAccesos || [];
-            $("#statDentro").text(accesos.length);
+            $("#statDentro").text(d.sociosDentro || 0);
             $("#statAportaciones").text(formatCurrency(d.totalAportaciones));
             $("#statRetiradas").text(formatCurrency(d.totalRetiradas));
 
@@ -465,7 +530,7 @@ var MexClub = (function () {
     }
 
     function renderAportacionItem(a) {
-        return '<div class="list-group-item">'
+        return '<button type="button" class="list-group-item list-group-item-action js-dashboard-delete-item" data-kind="aportacion" data-id="' + a.id + '">'
             + '<div class="d-flex align-items-center gap-2">'
             + renderSocioAvatar(a.socioNombre, a.socioFotoUrl)
             + '<div class="flex-grow-1 min-width-0">'
@@ -473,11 +538,11 @@ var MexClub = (function () {
             + '<small class="text-muted">' + escapeHtml(a.socioDocumento) + ' &bull; ' + formatDateTime(a.fecha) + '</small>'
             + '</div>'
             + '<span class="fw-bold text-success text-nowrap">+' + formatCurrency(a.cantidadAportada) + '</span>'
-            + '</div></div>';
+            + '</div></button>';
     }
 
     function renderRetiradaItem(r) {
-        return '<div class="list-group-item">'
+        return '<button type="button" class="list-group-item list-group-item-action js-dashboard-delete-item" data-kind="retirada" data-id="' + r.id + '">'
             + '<div class="d-flex align-items-center gap-2">'
             + renderSocioAvatar(r.socioNombre, r.socioFotoUrl)
             + '<div class="flex-grow-1 min-width-0">'
@@ -486,7 +551,7 @@ var MexClub = (function () {
             + '<br><small class="text-muted">' + formatDateTime(r.fecha) + '</small>'
             + '</div>'
             + '<span class="fw-bold text-danger text-nowrap">-' + formatCurrency(r.total) + '</span>'
-            + '</div></div>';
+            + '</div></button>';
     }
 
     function formInput(label, id, type, required, icon) {
@@ -841,27 +906,23 @@ var MexClub = (function () {
     var Socios = {
         load: function (page) {
             _sociosPage = page || 1;
-            MexClubApi.getSocios(_sociosPage, 20, true)
-                .then(function (res) {
-                    if (!res.success) return;
-                    var items = res.data.items || [];
-                    var html = items.length
-                        ? items.map(renderSocioItem).join("")
-                        : emptyState("No se encontraron socios");
-
-                    if (_sociosPage === 1) {
-                        $("#listSocios").html(html);
-                    } else {
-                        $("#listSocios").append(html);
-                    }
-                    _sociosHasMore = res.data.hasNext;
-                    $("#btnLoadMoreSocios").toggleClass("d-none", !_sociosHasMore);
-                })
-                .catch(function (err) { showToast("Error", err.message, "danger"); });
+            // User requested NOT to show list immediately.
+            if (_sociosPage === 1) {
+                $("#listSocios").html(
+                    '<div class="text-center py-5 text-muted">'
+                    + '<i class="bi bi-search" style="font-size: 3rem;"></i>'
+                    + '<p class="mt-3">Utilice el buscador para encontrar socios</p>'
+                    + '</div>'
+                );
+                $("#btnLoadMoreSocios").addClass("d-none");
+                return;
+            }
+            // Logic for loadMore if needed, or if we decide to allow "Show All" later
         },
 
         loadMore: function () {
-            Socios.load(_sociosPage + 1);
+            // Only if we are in a search context or browsing all
+            // For now, simpler to just keep search-based.
         },
 
         search: function () {
@@ -897,8 +958,8 @@ var MexClub = (function () {
                         + '<div class="row g-2">'
                         + infoRow("Documento", s.tipoDocumento + ": " + s.documento, "credit-card")
                         + infoRow("Email", s.email, "envelope")
+                        + '<div class="col-12 mb-2"><small class="text-muted d-block"><i class="bi bi-geo-alt me-1 text-muted"></i>Dirección</small><span class="fw-semibold">' + escapeHtml([s.direccion, s.localidad, s.provincia].filter(Boolean).join(", ") || "-") + '</span></div>'
                         + infoRow("Teléfono", s.telefono, "telephone")
-                        + infoRow("Dirección", [s.direccion, s.localidad, s.provincia].filter(Boolean).join(", "), "geo-alt")
                         + infoRow("F. Nacimiento", formatDate(s.fechaNacimiento), "calendar-heart")
                         + infoRow("F. Alta", formatDate(s.fechaAlta), "calendar-check")
                         + infoRow("Referido Por", s.referidoPorCodigo, "people")
@@ -908,10 +969,8 @@ var MexClub = (function () {
                         + infoRow("Debe Cuota", s.esExento ? "Exento" : (d.debeCuota ? "Sí" : "No"), "exclamation-circle")
                         + '</div>';
 
-                    if (s.comentario) {
-                        body += '<hr><h6 class="text-muted mb-2"><i class="bi bi-chat-left-text me-1"></i>Observaciones</h6>'
-                            + '<p class="mb-0 small">' + escapeHtml(s.comentario) + '</p>';
-                    }
+                    body += '<hr><h6 class="text-muted mb-2"><i class="bi bi-chat-left-text me-1"></i>Observaciones</h6>'
+                         + '<div class="mb-3"><span class="fw-semibold">' + escapeHtml(s.comentario || "-") + '</span></div>';
 
                     body += '<hr><h6 class="text-muted mb-2"><i class="bi bi-image me-1"></i>Documentación</h6>'
                         + '<div class="row g-2">'
@@ -1690,8 +1749,18 @@ var MexClub = (function () {
         }
     };
 
-    // ========== RETIRADAS ==========
+    // ========== RETIRADAS (POS) ==========
     var Retiradas = {
+        _state: {
+            socio: null,
+            cart: [],
+            familias: [],
+            articulos: [],
+            signaturePad: null,
+            selectedArticuloId: null,
+            cartOpen: false
+        },
+
         load: function (page) {
             _retiradasPage = page || 1;
             MexClubApi.getRetiradas(_retiradasPage, 20)
@@ -1718,88 +1787,834 @@ var MexClub = (function () {
         },
 
         showCreate: function () {
-            MexClubApi.getFamilias(true).then(function (fRes) {
-                var familias = (fRes.data || []);
-                return MexClubApi.getArticulos(true).then(function (aRes) {
-                    var articulos = aRes.data || [];
-                    var familiaOpts = familias.map(function (f) {
-                        return { value: f.id, text: f.nombre };
-                    });
+            Retiradas._state = {
+                socio: null,
+                cart: [],
+                familias: [],
+                articulos: [],
+                signaturePad: null,
+                selectedArticuloId: null,
+                cartOpen: false
+            };
 
-                    var body = '<form id="formRetirada">'
-                        + socioLookupWidget("retCodigo", "retSocioInfo")
-                        + formSelect("Familia", "retFamilia", [{ value: "", text: "-- Todas --" }].concat(familiaOpts), "tags")
-                        + formSelect("Artículo", "retArticulo", articulos.map(function (a) {
-                            return { value: a.id, text: a.nombre + " (" + formatCurrency(a.precio) + ")" };
-                        }), "box-seam")
-                        + formInput("Cantidad", "retCantidad", "number", true, "plus-slash-minus")
-                        + '<div id="retTotal" class="alert alert-info fw-bold text-end d-none mb-3"><i class="bi bi-calculator me-1"></i><span id="retTotalVal"></span></div>'
-                        + '</form>';
-
-                    var footer = '<button class="btn btn-secondary btn-sm" data-bs-dismiss="modal"><i class="bi bi-x-lg me-1"></i>Cancelar</button>'
-                        + '<button class="btn btn-primary btn-sm" data-action="retirada-do-create"><i class="bi bi-cart-check me-1"></i>Registrar Retirada</button>';
-                    showModal("Nueva Retirada", body, footer);
-
-                    window._retArticulos = articulos;
-                    bindSocioLookup("retCodigo", "retSocioInfo");
-
-                    $("#retFamilia").on("change", function () {
-                        var famId = parseInt($(this).val(), 10);
-                        var filtered = famId ? window._retArticulos.filter(function (a) { return a.familiaId === famId; }) : window._retArticulos;
-                        var opts = filtered.map(function (a) {
-                            return '<option value="' + a.id + '">' + escapeHtml(a.nombre) + ' (' + formatCurrency(a.precio) + ')</option>';
-                        }).join("");
-                        $("#retArticulo").html(opts);
-                    });
-
-                    function updateTotal() {
-                        var artId = parseInt(getFormVal("retArticulo"), 10);
-                        var cant = getFormFloat("retCantidad") || 0;
-                        var art = (window._retArticulos || []).find(function (a) { return a.id === artId; });
-                        var total = art ? art.precio * cant : 0;
-                        if (total > 0) {
-                            $("#retTotal").removeClass("d-none");
-                            $("#retTotalVal").text("Total: " + formatCurrency(total));
-                        } else {
-                            $("#retTotal").addClass("d-none");
-                        }
-                    }
-                    $("#retCantidad, #retArticulo").on("input change", updateTotal);
-                });
+            Promise.all([
+                MexClubApi.getFamilias(true),
+                MexClubApi.getArticulos(true)
+            ]).then(function (results) {
+                Retiradas._state.familias = results[0].data || [];
+                Retiradas._state.articulos = results[1].data || [];
+                Retiradas._renderPOS();
+            }).catch(function (err) {
+                showToast("Error", "No se pudieron cargar los datos: " + err.message, "danger");
             });
         },
 
-        doCreate: function () {
-            var socioId = $("#retSocioInfo").data("socio-id");
-            var articuloId = getFormInt("retArticulo");
-            var cantidad = getFormFloat("retCantidad");
-            if (!articuloId || !cantidad) {
-                showToast("Error", "Complete todos los campos", "warning");
+        _renderPOS: function () {
+            var s = Retiradas._state;
+            var familiasConArticulos = {};
+            (s.articulos || []).forEach(function (a) {
+                if (a && a.isActive && a.familiaId) familiasConArticulos[a.familiaId] = true;
+            });
+            var familiasOptions = '<option value="">Todas las familias</option>';
+            familiasOptions += s.familias.map(function (f) {
+                if (!f || !f.isActive || !familiasConArticulos[f.id]) return "";
+                return '<option value="' + f.id + '">' + escapeHtml(f.nombre) + '</option>';
+            }).join("");
+
+            var body = '<div class="retiradas-pos">'
+                + '<div class="card border-0 shadow-sm mb-3 pos-socio-search-card">'
+                + '<div class="card-body p-2">'
+                + '<div class="position-relative">'
+                + '<div class="input-group">'
+                + '<span class="input-group-text bg-white border-end-0"><i class="bi bi-search text-primary"></i></span>'
+                + '<input type="text" class="form-control border-start-0 px-2" id="posSocioSearch" placeholder="Buscar socio (nombre, código, documento...)" autocomplete="off">'
+                + '</div>'
+                + '<div id="posSocioResults" class="list-group position-absolute w-100 shadow-lg d-none" style="z-index: 1050; top: 100%;"></div>'
+                + '</div>'
+                + '<div class="socio-card-pos d-none mt-3" id="posSocioCard"></div>'
+                + '<div id="posMoneySummary" class="pos-money-summary d-none mt-2">'
+                + '<small class="text-muted d-block">Esta retirada</small><strong id="posResumenCarrito">0.00 €</strong>'
+                + '</div>'
+                + '<div class="alert alert-info mt-3 mb-0" id="posSocioLockHint"><i class="bi bi-person-check me-2"></i>Primero selecciona un socio para poder operar.</div>'
+                + '</div>'
+                + '</div>'
+
+                + '<div class="card border-0 shadow-sm">'
+                + '<div class="card-header bg-white border-0 p-3 position-relative">'
+                + '<div class="d-flex gap-2 align-items-start">'
+                + '<div class="position-relative flex-grow-1">'
+                + '<i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-muted"></i>'
+                + '<input type="text" class="form-control ps-5 rounded-pill bg-light border-0" id="posSearchProd" placeholder="Buscar artículo...">'
+                + '<div id="posProdResults" class="list-group position-absolute w-100 shadow d-none" style="top: calc(100% + 6px); z-index: 1045;"></div>'
+                + '</div>'
+                + '<button type="button" class="btn btn-outline-primary position-relative" id="posCartToggle">'
+                + '<i class="bi bi-cart3 fs-5"></i>'
+                + '<span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger" id="posCartBadge">0</span>'
+                + '</button>'
+                + '</div>'
+                + '<div class="mt-3">'
+                + '<label class="form-label small text-muted mb-1" for="posFilterFamilia">Familia</label>'
+                + '<select id="posFilterFamilia" class="form-select form-select-sm">' + familiasOptions + '</select>'
+                + '</div>'
+                + '<div class="d-flex flex-wrap gap-2 mt-3">'
+                + '<button type="button" class="btn btn-outline-success pos-quick-amount" data-amount="10">10</button>'
+                + '<button type="button" class="btn btn-outline-success pos-quick-amount" data-amount="20">20</button>'
+                + '<button type="button" class="btn btn-outline-success pos-quick-amount" data-amount="30">30</button>'
+                + '<button type="button" class="btn btn-outline-success pos-quick-amount" data-amount="50">50</button>'
+                + '<div class="small text-muted align-self-center ms-1">Importe rápido en € (se convierte según precio del artículo)</div>'
+                + '</div>'
+                + '<div id="posSelectedArticle" class="small mt-2 text-muted">Selecciona un artículo para usar los importes rápidos.</div>'
+                + '<div id="posCartPanel" class="pos-cart-panel d-none">'
+                + '<div class="d-flex justify-content-between align-items-center mb-2">'
+                + '<h6 class="mb-0"><i class="bi bi-cart3 me-1"></i>Carrito</h6>'
+                + '<button class="btn btn-sm btn-light border" id="posCartClose" type="button"><i class="bi bi-x-lg"></i></button>'
+                + '</div>'
+                + '<div class="cart-list" id="posCartList"></div>'
+                + '<div class="border-top pt-2 mt-2">'
+                + '<div class="d-flex justify-content-between text-muted"><span>Acumulado</span><strong id="posCount">0.00</strong></div>'
+                + '<div class="d-flex justify-content-between align-items-center fs-5"><span>Total</span><strong id="posTotal" class="text-primary">0.00 €</strong></div>'
+                + '</div>'
+                + '</div>'
+                + '</div>'
+                + '<div class="card-body p-2 bg-light rounded-bottom">'
+                + '<div class="product-grid" id="posProductGrid"></div>'
+                + '</div>'
+                + '</div>'
+
+                + '</div>';
+
+            var footer = '<button class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>'
+                + '<button class="btn btn-primary px-5 py-2 fw-bold" id="btnPosConfirm" disabled><i class="bi bi-check-lg me-2"></i>CONFIRMAR</button>';
+
+            showModal("Nueva Retirada", body, footer);
+            $(".modal-dialog").addClass("modal-xl");
+
+            Retiradas._renderProducts();
+            Retiradas._renderCart();
+            Retiradas._bindEvents();
+            Retiradas._validate();
+
+            var modalEl = document.getElementById("genericModal");
+            modalEl.addEventListener("shown.bs.modal", function () {
+                $("#posSocioSearch").focus();
+            }, { once: true });
+
+            modalEl.addEventListener("hidden.bs.modal", function () {
+                $(document).off(".retiradas-pos");
+                $(document).off(".retirada-sign");
+            }, { once: true });
+        },
+
+        _bindEvents: function () {
+            var $socioInput = $("#posSocioSearch");
+            var $socioResults = $("#posSocioResults");
+            var $prodInput = $("#posSearchProd");
+
+            var doSocioSearch = debounce(function () {
+                var q = ($socioInput.val() || "").trim();
+                if (q.length < 2) {
+                    $socioResults.addClass("d-none").html("");
+                    return;
+                }
+
+                MexClubApi.searchSocios(q, 15).then(function (res) {
+                    var data = (res.success && res.data) ? res.data : [];
+                    if (!data.length) {
+                        $socioResults.removeClass("d-none").html('<div class="list-group-item text-muted text-center py-3">No se encontraron socios</div>');
+                        return;
+                    }
+
+                    var term = q.toLowerCase();
+                    var list = data.sort(function (a, b) {
+                        var aName = (a.nombreCompleto || "").toLowerCase();
+                        var bName = (b.nombreCompleto || "").toLowerCase();
+                        var aStarts = aName.indexOf(term) === 0;
+                        var bStarts = bName.indexOf(term) === 0;
+                        if (aStarts !== bStarts) return aStarts ? -1 : 1;
+                        return aName.localeCompare(bName);
+                    });
+
+                    var html = list.map(function (socio) {
+                        var img = socio.fotoUrl || "/images/sin_foto.jpg";
+                        return '<button type="button" class="list-group-item list-group-item-action d-flex align-items-center gap-2 p-1" onclick="MexClub.Retiradas._selectSocioId(' + socio.id + ')">'
+                            + '<img src="' + img + '" class="rounded-circle object-fit-cover" style="width:32px;height:32px" onerror="this.src=\'/images/sin_foto.jpg\'">'
+                            + '<div><div class="fw-semibold text-dark small">' + escapeHtml(socio.nombreCompleto) + '</div>'
+                            + '<small class="text-muted">' + escapeHtml(socio.codigo) + ' • ' + escapeHtml(socio.documento) + '</small></div>'
+                            + '</button>';
+                    }).join("");
+                    $socioResults.removeClass("d-none").html(html);
+                }).catch(noop);
+            }, 220);
+
+            $socioInput.on("input", doSocioSearch);
+            $socioInput.on("focus", function () {
+                if (($socioInput.val() || "").trim().length >= 2) $socioResults.removeClass("d-none");
+            });
+
+            $prodInput.on("input", debounce(function () {
+                Retiradas._renderProducts();
+                Retiradas._renderProductSearchResults();
+            }, 180));
+
+            $prodInput.on("focus", function () {
+                if (($prodInput.val() || "").trim().length > 0) Retiradas._renderProductSearchResults();
+            });
+
+            $("#posFilterFamilia").on("change", function () {
+                Retiradas._renderProducts();
+            });
+
+            $(".pos-quick-amount").on("click", function () {
+                var amount = parseFloat($(this).data("amount")) || 0;
+                Retiradas._addQuickAmount(amount);
+            });
+
+            $("#posCartToggle").on("click", function () {
+                if (!Retiradas._requireSocio("abrir el carrito")) return;
+                Retiradas._toggleCartPanel();
+            });
+
+            $("#posCartClose").on("click", function () {
+                Retiradas._state.cartOpen = false;
+                $("#posCartPanel").addClass("d-none");
+            });
+
+            $("#btnPosConfirm").on("click", Retiradas._handleConfirmClick);
+
+            $(document).off("click.retiradas-pos").on("click.retiradas-pos", function (e) {
+                if (!$(e.target).closest("#posSocioResults, #posSocioSearch").length) {
+                    $("#posSocioResults").addClass("d-none");
+                }
+                if (!$(e.target).closest("#posProdResults, #posSearchProd").length) {
+                    $("#posProdResults").addClass("d-none");
+                }
+                if (!$(e.target).closest("#posCartPanel, #posCartToggle").length && Retiradas._state.cartOpen) {
+                    Retiradas._state.cartOpen = false;
+                    $("#posCartPanel").addClass("d-none");
+                }
+            });
+        },
+
+        _requireSocio: function (actionLabel) {
+            if (Retiradas._state.socio) return true;
+            if (actionLabel) {
+                showToast("Socio requerido", "Debes seleccionar un socio para " + actionLabel + ".", "warning");
+            }
+            return false;
+        },
+
+        _selectSocioId: function (id) {
+            MexClubApi.getSocio(id).then(function (res) {
+                if (res.success && res.data) Retiradas._selectSocio(res.data);
+            });
+            $("#posSocioResults").addClass("d-none");
+        },
+
+        _selectSocio: function (socio) {
+            Retiradas._state.socio = socio;
+            var d = socio.detalle || {};
+            var img = socio.fotoUrl || "/images/sin_foto.jpg";
+            var stars = "";
+            for (var i = 0; i < 5; i++) stars += '<i class="bi bi-star' + (i < socio.estrellas ? '-fill text-warning' : ' text-muted') + '"></i>';
+
+            var html = '<div class="d-flex align-items-center gap-3 p-2">'
+                + '<img src="' + img + '" class="rounded-circle shadow-sm object-fit-cover" style="width:80px;height:80px;border:3px solid #fff;" onerror="this.src=\'/images/sin_foto.jpg\'">'
+                + '<div class="flex-grow-1">'
+                + '<div class="d-flex justify-content-between">'
+                + '<h4 class="mb-0 fw-bold text-dark">' + escapeHtml(socio.nombreCompleto) + '</h4>'
+                + '<button class="btn btn-outline-danger btn-sm" onclick="MexClub.Retiradas._clearSocio()" title="Cambiar socio"><i class="bi bi-x-lg"></i></button>'
+                + '</div>'
+                + '<div class="text-muted mb-2">' + escapeHtml(socio.codigo) + ' • ' + escapeHtml(socio.documento) + ' <span class="ms-2">' + stars + '</span></div>'
+                + '<div class="d-flex gap-2 flex-wrap">'
+                + '<div class="badge bg-success bg-opacity-10 text-success border border-success p-2 px-3 rounded-pill"><small class="d-block text-uppercase fw-bold" style="font-size:0.65rem">Disponible</small><span class="fs-6 fw-bold" id="posSocioDisponible">' + formatCurrency(d.aprovechable) + '</span></div>'
+                + '<div class="badge bg-danger bg-opacity-10 text-danger border border-danger p-2 px-3 rounded-pill"><small class="d-block text-uppercase fw-bold" style="font-size:0.65rem">Consumido</small><span class="fs-6 fw-bold" id="posSocioConsumido">' + Retiradas._formatAcumulado(d.consumicionDelMes || 0) + ' g</span></div>'
+                + '<div class="badge bg-secondary bg-opacity-10 text-secondary border border-secondary p-2 px-3 rounded-pill"><small class="d-block text-uppercase fw-bold" style="font-size:0.65rem">Límite</small><span class="fs-6 fw-bold">' + Retiradas._formatAcumulado(socio.consumicionMaximaMensual || 0) + ' g</span></div>'
+                + '</div>'
+                + '</div>'
+                + '</div>';
+
+            $("#posSocioCard").removeClass("d-none").html(html);
+            $("#posSocioSearch").closest(".position-relative").addClass("d-none");
+            Retiradas._renderProducts();
+            Retiradas._renderCart();
+            Retiradas._validate();
+        },
+
+        _clearSocio: function () {
+            Retiradas._state.socio = null;
+            Retiradas._state.cart = [];
+            Retiradas._state.selectedArticuloId = null;
+            Retiradas._state.cartOpen = false;
+            $("#posSocioCard").addClass("d-none").html("");
+            $("#posSocioSearch").closest(".position-relative").removeClass("d-none");
+            $("#posSocioSearch").val("").focus();
+            $("#posCartPanel").addClass("d-none");
+            $("#posSelectedArticle").text("Selecciona un artículo para usar los importes rápidos.");
+            Retiradas._renderProducts();
+            Retiradas._renderCart();
+            Retiradas._validate();
+        },
+
+        _renderProductSearchResults: function () {
+            if (!Retiradas._state.socio) {
+                $("#posProdResults").addClass("d-none").html("");
                 return;
             }
-            if (!socioId) {
-                var codigo = getFormValTrimmed("retCodigo");
-                if (!codigo) { showToast("Error", "Introduzca código de socio", "warning"); return; }
-                MexClubApi.buscarSocio(codigo)
-                    .then(function (res) {
-                        if (!res.success || !res.data) { showToast("Error", "Socio no encontrado", "danger"); return; }
-                        return MexClubApi.createRetirada({
-                            socioId: res.data.id, articuloId: articuloId,
-                            usuarioId: MexClubApi.getUser().id, cantidad: cantidad, firmaBase64: null
-                        });
-                    })
-                    .then(function (r) {
-                        if (r && r.success) { closeModal(); showToast("Retirada registrada", formatCurrency(r.data.total), "success"); Retiradas.load(); }
-                    })
-                    .catch(function (err) { showToast("Error", err.message, "danger"); });
+            var q = ($("#posSearchProd").val() || "").trim().toLowerCase();
+            var $results = $("#posProdResults");
+            if (!q) {
+                $results.addClass("d-none").html("");
                 return;
             }
-            MexClubApi.createRetirada({
-                socioId: socioId, articuloId: articuloId,
-                usuarioId: MexClubApi.getUser().id, cantidad: cantidad, firmaBase64: null
-            }).then(function (r) {
-                if (r && r.success) { closeModal(); showToast("Retirada registrada", formatCurrency(r.data.total), "success"); Retiradas.load(); }
-            }).catch(function (err) { showToast("Error", err.message, "danger"); });
+
+            var list = Retiradas._state.articulos
+                .filter(function (a) {
+                    return a.isActive && (a.nombre || "").toLowerCase().indexOf(q) !== -1;
+                })
+                .sort(function (a, b) {
+                    var aName = (a.nombre || "").toLowerCase();
+                    var bName = (b.nombre || "").toLowerCase();
+                    var aStarts = aName.indexOf(q) === 0;
+                    var bStarts = bName.indexOf(q) === 0;
+                    if (aStarts !== bStarts) return aStarts ? -1 : 1;
+                    return aName.localeCompare(bName);
+                })
+                .slice(0, 10);
+
+            if (!list.length) {
+                $results.removeClass("d-none").html('<div class="list-group-item text-muted text-center py-2">Sin resultados</div>');
+                return;
+            }
+
+            var html = list.map(function (a) {
+                return '<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" onclick="MexClub.Retiradas._selectArticuloFromSearch(' + a.id + ')">'
+                    + '<span class="text-truncate me-2">' + escapeHtml(a.nombre) + '</span>'
+                    + '<small class="text-muted">' + formatCurrency(a.precio) + '</small>'
+                    + '</button>';
+            }).join("");
+
+            $results.removeClass("d-none").html(html);
+        },
+
+        _selectArticuloFromSearch: function (articuloId) {
+            if (!Retiradas._requireSocio("seleccionar artículos")) return;
+            var art = Retiradas._state.articulos.find(function (a) { return a.id === articuloId; });
+            if (!art) return;
+
+            Retiradas._state.selectedArticuloId = art.id;
+            $("#posSearchProd").val(art.nombre);
+            $("#posProdResults").addClass("d-none").html("");
+
+            $("#posFilterFamilia").val(String(art.familiaId || ""));
+
+            $("#posSelectedArticle").html('<span class="fw-semibold">Seleccionado:</span> ' + escapeHtml(art.nombre) + ' <span class="text-muted">(' + formatCurrency(art.precio) + '/g)</span>');
+            Retiradas._renderProducts();
+        },
+
+        _renderProducts: function () {
+            var socioSelected = !!Retiradas._state.socio;
+            var famId = parseInt($("#posFilterFamilia").val(), 10) || 0;
+            var q = ($("#posSearchProd").val() || "").trim().toLowerCase();
+
+            var list = Retiradas._state.articulos.filter(function (a) {
+                if (!a.isActive) return false;
+                if (famId && a.familiaId !== famId) return false;
+                if (q && (a.nombre || "").toLowerCase().indexOf(q) === -1) return false;
+                return true;
+            });
+
+            if (!list.length) {
+                $("#posProductGrid").html('<div class="col-12 text-center text-muted py-5"><i class="bi bi-box-seam display-4 d-block mb-3 opacity-25"></i>No hay productos</div>');
+                return;
+            }
+
+            var html = list.map(function (a) {
+                var hues = [200, 150, 40, 280, 10, 340, 100, 25];
+                var hue = hues[(a.familiaId || 0) % hues.length];
+                var style = 'border-top: 4px solid hsl(' + hue + ', 70%, 50%);';
+                var selectedCls = Retiradas._state.selectedArticuloId === a.id ? " pos-product-selected" : "";
+                var lockCls = socioSelected ? "" : " pos-product-locked";
+
+                return '<div class="product-card h-100 shadow-sm border-0' + selectedCls + lockCls + '" data-art-id="' + a.id + '" style="' + style + '" onclick="MexClub.Retiradas._addToCart(' + a.id + ')">'
+                    + '<div class="card-body p-2 d-flex flex-column h-100">'
+                    + '<small class="text-muted text-uppercase fw-bold" style="font-size:0.65rem">' + escapeHtml(a.familiaNombre || "General") + '</small>'
+                    + '<div class="prod-name flex-grow-1 fw-bold text-dark my-1" title="' + escapeHtml(a.nombre) + '">' + escapeHtml(a.nombre) + '</div>'
+                    + '<div class="d-flex justify-content-between align-items-end mt-2">'
+                    + '<span class="badge bg-light text-dark border">' + formatCurrency(a.precio) + '/g</span>'
+                    + '<i class="bi bi-plus-circle-fill text-primary fs-5"></i>'
+                    + '</div>'
+                    + '</div>'
+                    + '</div>';
+            }).join("");
+
+            $("#posProductGrid").html(html);
+        },
+
+        _addToCart: function (articuloId) {
+            if (!Retiradas._requireSocio("añadir artículos")) return;
+            var art = Retiradas._state.articulos.find(function (a) { return a.id === articuloId; });
+            if (!art) return;
+
+            Retiradas._state.selectedArticuloId = art.id;
+            $("#posSelectedArticle").html('<span class="fw-semibold">Seleccionado:</span> ' + escapeHtml(art.nombre) + ' <span class="text-muted">(' + formatCurrency(art.precio) + '/g)</span>');
+            Retiradas._renderProducts();
+        },
+
+        _addQuickAmount: function (importe) {
+            if (!Retiradas._requireSocio("usar importes rápidos")) return;
+            if (!(importe > 0)) return;
+
+            var art = Retiradas._state.articulos.find(function (a) { return a.id === Retiradas._state.selectedArticuloId; });
+            if (!art) {
+                showToast("Selecciona artículo", "Debes seleccionar un artículo antes de usar 10/20/30/50.", "warning");
+                return;
+            }
+
+            if (!(art.precio > 0)) {
+                showToast("Precio inválido", "El artículo seleccionado no tiene precio válido.", "warning");
+                return;
+            }
+
+            var pago = Retiradas._round2(importe);
+            var qty = Retiradas._floor4(pago / art.precio);
+            if (!(qty > 0)) return;
+
+            var existing = Retiradas._state.cart.find(function (item) { return item.id === art.id; });
+            if (existing) {
+                existing.pagado = Retiradas._round2((existing.pagado || existing.total || 0) + pago);
+                existing.cantidad = Retiradas._floor4(existing.pagado / existing.precio);
+                existing.total = existing.pagado;
+            } else {
+                Retiradas._state.cart.push({
+                    id: art.id,
+                    nombre: art.nombre,
+                    precio: art.precio,
+                    cantidad: qty,
+                    pagado: pago,
+                    total: pago
+                });
+            }
+
+            Retiradas._renderCart();
+        },
+
+        _removeFromCart: function (idx) {
+            if (!Retiradas._requireSocio("modificar el carrito")) return;
+            Retiradas._state.cart.splice(idx, 1);
+            Retiradas._renderCart();
+        },
+
+        _toggleCartPanel: function () {
+            Retiradas._state.cartOpen = !Retiradas._state.cartOpen;
+            $("#posCartPanel").toggleClass("d-none", !Retiradas._state.cartOpen);
+        },
+
+        _formatQty: function (val) {
+            var num = parseFloat(val || 0);
+            if (Math.abs(num % 1) < 0.00001) return String(parseInt(num, 10));
+            return num.toFixed(2);
+        },
+
+        _formatAcumulado: function (val) {
+            return Retiradas._formatQty(val);
+        },
+
+        _round2: function (val) {
+            return Math.round(parseFloat(val || 0) * 100) / 100;
+        },
+
+        _round4: function (val) {
+            return Math.round(parseFloat(val || 0) * 10000) / 10000;
+        },
+
+        _floor4: function (val) {
+            return Math.floor(parseFloat(val || 0) * 10000) / 10000;
+        },
+
+        _getCartTotal: function () {
+            return Retiradas._round2((Retiradas._state.cart || []).reduce(function (sum, item) {
+                return sum + (item.total || 0);
+            }, 0));
+        },
+
+        _getSocioFinancials: function (cartTotal) {
+            var socio = Retiradas._state.socio;
+            var d = socio && socio.detalle ? socio.detalle : {};
+            var limiteMensualGramos = Retiradas._round4(socio ? (socio.consumicionMaximaMensual || 0) : 0);
+            var saldoDisponible = Retiradas._round2(d.aprovechable || 0);
+            var consumidoActualGramos = Retiradas._round4(d.consumicionDelMes || 0);
+            var total = Retiradas._round2(cartTotal || 0);
+            var gramosCarrito = Retiradas._round4((Retiradas._state.cart || []).reduce(function (sum, item) {
+                return sum + (item.cantidad || 0);
+            }, 0));
+            var saldoRestante = Retiradas._round2(saldoDisponible - total);
+            var consumidoTrasRetiradaGramos = Retiradas._round4(consumidoActualGramos + gramosCarrito);
+            var superaLimite = limiteMensualGramos > 0 && (consumidoTrasRetiradaGramos - limiteMensualGramos) > 0.00001;
+            var saldoInsuficiente = saldoRestante < -0.01;
+
+            return {
+                limiteMensual: limiteMensualGramos,
+                saldoDisponible: saldoDisponible,
+                consumidoActual: consumidoActualGramos,
+                saldoRestante: saldoRestante,
+                consumidoTrasRetirada: consumidoTrasRetiradaGramos,
+                superaLimite: superaLimite,
+                saldoInsuficiente: saldoInsuficiente
+            };
+        },
+
+        _renderCart: function () {
+            var cart = Retiradas._state.cart;
+            var $list = $("#posCartList");
+            var $total = $("#posTotal");
+            var $count = $("#posCount");
+            var $badge = $("#posCartBadge");
+
+            if (!cart.length) {
+                $list.html('<div class="text-center text-muted py-4"><i class="bi bi-basket fs-2 d-block mb-2"></i>Carrito vacío</div>');
+                $total.text("0.00 €");
+                $count.text("0.00");
+                $badge.text("0");
+                Retiradas._validate();
+                return;
+            }
+
+            var totalSum = 0;
+            var lines = cart.length;
+            var gramsSum = 0;
+
+            var html = cart.map(function (item, idx) {
+                totalSum += item.total;
+                gramsSum += item.cantidad;
+                return '<div class="cart-item p-2 border-bottom">'
+                    + '<div class="d-flex justify-content-between align-items-start gap-2">'
+                    + '<div class="min-width-0">'
+                    + '<div class="fw-semibold text-truncate" title="' + escapeHtml(item.nombre) + '">' + escapeHtml(item.nombre) + '</div>'
+                    + '<small class="text-muted d-block">Precio: ' + formatCurrency(item.precio) + '/g</small>'
+                    + '<small class="text-muted">Acumulado: ' + Retiradas._formatAcumulado(item.cantidad) + '</small>'
+                    + '</div>'
+                    + '<div class="text-end">'
+                    + '<div class="fw-bold text-primary">' + formatCurrency(item.total) + '</div>'
+                    + '<button class="btn btn-sm btn-link text-danger p-0" onclick="MexClub.Retiradas._removeFromCart(' + idx + ')"><i class="bi bi-trash"></i> Eliminar</button>'
+                    + '</div>'
+                    + '</div>'
+                    + '</div>';
+            }).join("");
+
+            $list.html(html);
+            totalSum = Retiradas._round2(totalSum);
+            $total.text(formatCurrency(totalSum));
+            $count.text(Retiradas._formatAcumulado(gramsSum));
+            $badge.text(String(lines));
+            Retiradas._validate();
+        },
+
+        _updateMoneySummary: function (cartTotal) {
+            var socio = Retiradas._state.socio;
+            var carrito = Retiradas._round2(cartTotal || 0);
+            var gramosCarrito = (Retiradas._state.cart || []).reduce(function (sum, item) { return sum + (item.cantidad || 0); }, 0);
+            var fin = Retiradas._getSocioFinancials(carrito);
+
+            $("#posResumenCarrito").text(formatCurrency(carrito) + " · " + Retiradas._formatAcumulado(gramosCarrito));
+            $("#posSocioDisponible").text(formatCurrency(fin.saldoRestante));
+            $("#posSocioConsumido").text(Retiradas._formatAcumulado(fin.consumidoTrasRetirada) + " g");
+
+            $("#posMoneySummary").toggleClass("d-none", !socio);
+        },
+
+        _validate: function () {
+            var socio = Retiradas._state.socio;
+            var cart = Retiradas._state.cart;
+            var btn = $("#btnPosConfirm");
+            var locked = !socio;
+            var total = Retiradas._getCartTotal();
+
+            Retiradas._updateMoneySummary(total);
+
+            $("#posSocioLockHint").toggleClass("d-none", !locked);
+            $("#posSearchProd").prop("disabled", locked);
+            $(".pos-quick-amount").prop("disabled", locked);
+            $("#posCartToggle").prop("disabled", locked);
+
+            if (locked) {
+                Retiradas._state.cartOpen = false;
+                $("#posCartPanel").addClass("d-none");
+            }
+
+            if (!socio || !cart.length) {
+                var label = socio ? 'CONFIRMAR' : 'SELECCIONA UN SOCIO';
+                btn.prop("disabled", true).removeClass("btn-danger btn-warning").addClass("btn-primary").html('<i class="bi bi-check-lg me-2"></i>' + label);
+                return;
+            }
+
+            var fin = Retiradas._getSocioFinancials(total);
+
+            if (fin.saldoInsuficiente) {
+                btn.prop("disabled", true).removeClass("btn-primary btn-warning").addClass("btn-danger")
+                    .html('<i class="bi bi-x-circle me-2"></i>SALDO INSUFICIENTE');
+                return;
+            }
+
+            if (fin.superaLimite) {
+                btn.prop("disabled", false).removeClass("btn-primary btn-danger").addClass("btn-warning")
+                    .html('<i class="bi bi-exclamation-triangle me-2"></i>CONFIRMAR · SUPERA LÍMITE');
+                return;
+            }
+
+            btn.prop("disabled", false).removeClass("btn-danger btn-warning").addClass("btn-primary").html('<i class="bi bi-check-lg me-2"></i>CONFIRMAR');
+        },
+
+        _initSignature: function (canvasId) {
+            var canvas = document.getElementById(canvasId || "posSigPad");
+            if (!canvas) return;
+
+            var ratio = Math.max(window.devicePixelRatio || 1, 1);
+            canvas.width = canvas.offsetWidth * ratio;
+            canvas.height = canvas.offsetHeight * ratio;
+            canvas.getContext("2d").scale(ratio, ratio);
+
+            var ctx = canvas.getContext("2d");
+            ctx.lineWidth = 2;
+            ctx.lineCap = "round";
+            ctx.strokeStyle = "#000";
+
+            var isDrawing = false;
+            var lastX = 0;
+            var lastY = 0;
+
+            function getCoords(e) {
+                var rect = canvas.getBoundingClientRect();
+                var clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                var clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                return {
+                    x: clientX - rect.left,
+                    y: clientY - rect.top
+                };
+            }
+
+            $(canvas).off(".retirada-sign").on("mousedown.retirada-sign touchstart.retirada-sign", function (e) {
+                isDrawing = true;
+                var coords = getCoords(e);
+                lastX = coords.x;
+                lastY = coords.y;
+                e.preventDefault();
+            });
+
+            $(document).off("mousemove.retirada-sign touchmove.retirada-sign mouseup.retirada-sign touchend.retirada-sign");
+            $(document).on("mousemove.retirada-sign touchmove.retirada-sign", function (e) {
+                if (!isDrawing) return;
+                var coords = getCoords(e);
+                ctx.beginPath();
+                ctx.moveTo(lastX, lastY);
+                ctx.lineTo(coords.x, coords.y);
+                ctx.stroke();
+                lastX = coords.x;
+                lastY = coords.y;
+            });
+            $(document).on("mouseup.retirada-sign touchend.retirada-sign", function () {
+                isDrawing = false;
+            });
+
+            Retiradas._state.signaturePad = {
+                clear: function () {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                },
+                isEmpty: function () {
+                    var pixelBuffer = new Uint32Array(ctx.getImageData(0, 0, canvas.width, canvas.height).data.buffer);
+                    return !pixelBuffer.some(function (color) { return color !== 0; });
+                },
+                toDataURL: function () {
+                    return canvas.toDataURL("image/png");
+                }
+            };
+        },
+
+        _showLimitWarningModal: function (onAccept) {
+            var modalId = "retiradaLimitModal";
+            var existing = document.getElementById(modalId);
+            if (!existing) {
+                var html = ''
+                    + '<div class="modal fade" id="' + modalId + '" tabindex="-1" aria-hidden="true">'
+                    + '<div class="modal-dialog modal-dialog-centered">'
+                    + '<div class="modal-content">'
+                    + '<div class="modal-header">'
+                    + '<h5 class="modal-title"><i class="bi bi-exclamation-triangle text-warning me-2"></i>Límite mensual</h5>'
+                    + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
+                    + '</div>'
+                    + '<div class="modal-body">Esta retirada superará el límite mensual del socio. ¿Deseas continuar?</div>'
+                    + '<div class="modal-footer">'
+                    + '<button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">No</button>'
+                    + '<button type="button" class="btn btn-warning" id="btnRetiradaLimitAccept">Sí, continuar</button>'
+                    + '</div>'
+                    + '</div>'
+                    + '</div>'
+                    + '</div>';
+                $("body").append(html);
+                existing = document.getElementById(modalId);
+            }
+
+            var modal = bootstrap.Modal.getOrCreateInstance(existing, { backdrop: "static", keyboard: false });
+            $("#btnRetiradaLimitAccept").off("click").on("click", function () {
+                modal.hide();
+                if (onAccept) onAccept();
+            });
+            modal.show();
+        },
+
+        _showSignatureModal: function (onSigned) {
+            var modalId = "retiradaSignatureModal";
+            var existing = document.getElementById(modalId);
+            if (!existing) {
+                var html = ''
+                    + '<div class="modal fade" id="' + modalId + '" tabindex="-1" aria-hidden="true">'
+                    + '<div class="modal-dialog modal-dialog-centered">'
+                    + '<div class="modal-content">'
+                    + '<div class="modal-header">'
+                    + '<h5 class="modal-title"><i class="bi bi-pen text-primary me-2"></i>Firma obligatoria</h5>'
+                    + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
+                    + '</div>'
+                    + '<div class="modal-body">'
+                    + '<div class="signature-pad-wrapper">'
+                    + '<canvas class="signature-pad" id="retiradaSigPadModal"></canvas>'
+                    + '</div>'
+                    + '<small class="text-muted">Debes firmar para confirmar la retirada.</small>'
+                    + '</div>'
+                    + '<div class="modal-footer">'
+                    + '<button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>'
+                    + '<button type="button" class="btn btn-link text-danger me-auto" id="btnRetiradaSigClear"><i class="bi bi-eraser me-1"></i>Borrar</button>'
+                    + '<button type="button" class="btn btn-primary" id="btnRetiradaSigAccept">Firmar y confirmar</button>'
+                    + '</div>'
+                    + '</div>'
+                    + '</div>'
+                    + '</div>';
+                $("body").append(html);
+                existing = document.getElementById(modalId);
+            }
+
+            var modal = bootstrap.Modal.getOrCreateInstance(existing, { backdrop: "static", keyboard: false });
+            $(existing).off("shown.bs.modal.retirada-signature").on("shown.bs.modal.retirada-signature", function () {
+                Retiradas._initSignature("retiradaSigPadModal");
+            });
+
+            $("#btnRetiradaSigClear").off("click").on("click", function () {
+                if (Retiradas._state.signaturePad) Retiradas._state.signaturePad.clear();
+            });
+
+            $("#btnRetiradaSigAccept").off("click").on("click", function () {
+                if (!Retiradas._state.signaturePad || Retiradas._state.signaturePad.isEmpty()) {
+                    showToast("Firma obligatoria", "Debes firmar antes de confirmar la retirada.", "warning");
+                    return;
+                }
+                var firma = Retiradas._state.signaturePad.toDataURL();
+                modal.hide();
+                if (onSigned) onSigned(firma);
+            });
+
+            modal.show();
+        },
+
+        _handleConfirmClick: function () {
+            var socio = Retiradas._state.socio;
+            var cart = Retiradas._state.cart;
+            if (!socio || !cart.length) return;
+
+            var total = Retiradas._getCartTotal();
+            var fin = Retiradas._getSocioFinancials(total);
+            if (fin.saldoInsuficiente) {
+                showToast("Saldo insuficiente", "No hay saldo disponible suficiente para esta retirada.", "warning");
+                Retiradas._validate();
+                return;
+            }
+
+            var proceed = function (allowLimitExceed) {
+                Retiradas._showSignatureModal(function (firma) {
+                    Retiradas._submit(firma, !!allowLimitExceed);
+                });
+            };
+
+            if (fin.superaLimite) {
+                Retiradas._showLimitWarningModal(function () { proceed(true); });
+                return;
+            }
+
+            proceed(false);
+        },
+
+        _submit: function (firmaBase64, permitirExcesoLimiteMensual) {
+            var socio = Retiradas._state.socio;
+            var cart = Retiradas._state.cart;
+            if (!socio || !cart.length) return;
+
+            if (!firmaBase64) {
+                showToast("Firma obligatoria", "Debes firmar antes de confirmar la retirada.", "warning");
+                return;
+            }
+
+            $("#btnPosConfirm").prop("disabled", true).html('<span class="spinner-border spinner-border-sm me-1"></span>Procesando...');
+
+            var payload = {
+                socioId: socio.id,
+                usuarioId: MexClubApi.getUser().id,
+                firmaBase64: firmaBase64,
+                permitirExcesoLimiteMensual: !!permitirExcesoLimiteMensual,
+                items: cart.map(function (item) {
+                    return { articuloId: item.id, cantidad: item.cantidad };
+                })
+            };
+
+            MexClubApi.createRetiradaBatch(payload)
+                .then(function (res) {
+                    if (res.success) {
+                        var created = res.data || [];
+                        closeModal();
+                        Retiradas.load();
+                        Retiradas._showRetiradaCodesModal(created);
+                    } else {
+                        var msg = (res && res.message ? String(res.message) : "").toLowerCase();
+                        if (msg.indexOf("límite mensual excedido") !== -1 || msg.indexOf("limite mensual excedido") !== -1) {
+                            showToast("Límite mensual", "Se superó el límite mensual.", "warning");
+                        } else if (msg.indexOf("saldo insuficiente") !== -1) {
+                            showToast("Saldo insuficiente", "No hay saldo disponible suficiente para esta retirada.", "warning");
+                        } else {
+                            showToast("Error", "No se pudo completar la operación", "danger");
+                        }
+                        Retiradas._validate();
+                    }
+                })
+                .catch(function (err) {
+                    var msg = (err && err.message ? String(err.message) : "").toLowerCase();
+                    if (msg.indexOf("límite mensual excedido") !== -1 || msg.indexOf("limite mensual excedido") !== -1) {
+                        showToast("Límite mensual", "Se superó el límite mensual.", "warning");
+                    } else if (msg.indexOf("saldo insuficiente") !== -1) {
+                        showToast("Saldo insuficiente", "No hay saldo disponible suficiente para esta retirada.", "warning");
+                    } else {
+                        showToast("Error", err.message, "danger");
+                    }
+                    Retiradas._validate();
+                });
+        },
+
+        _showRetiradaCodesModal: function (createdItems) {
+            var items = createdItems || [];
+            if (!items.length) {
+                showToast("Retirada exitosa", "Retirada registrada correctamente.", "success");
+                return;
+            }
+
+            var codes = items.map(function (r) {
+                return "RET-" + r.id;
+            });
+
+            var lines = codes.map(function (code) {
+                return '<li class="mb-1"><strong>' + escapeHtml(code) + '</strong></li>';
+            }).join("");
+
+            var body = '<div class="alert alert-success mb-3"><i class="bi bi-check-circle me-2"></i>Retirada registrada correctamente.</div>'
+                + '<p class="mb-2">Apunta el código de retirada:</p>'
+                + '<ul class="mb-0 ps-3">' + lines + '</ul>';
+
+            var footer = '<button class="btn btn-primary" data-bs-dismiss="modal">Aceptar</button>';
+            showModal("Código de retirada", body, footer);
         }
     };
 

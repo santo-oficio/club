@@ -22,6 +22,15 @@ namespace MigradorDatos
     class Program
     {
         static int _totalMigrated = 0;
+        static HashSet<long> _usuarioIds = new HashSet<long>();
+        static HashSet<long> _socioIds = new HashSet<long>();
+        static HashSet<long> _articuloIds = new HashSet<long>();
+
+        // Mapas para resolución de referencias
+        static Dictionary<long, string> _referidoPorMap = new Dictionary<long, string>();
+        static Dictionary<string, long> _codigoToId = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        static Dictionary<string, long> _nombreToId = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        static Dictionary<int, long> _numSocioToId = new Dictionary<int, long>();
 
         static void Main(string[] args)
         {
@@ -67,25 +76,32 @@ namespace MigradorDatos
                     Console.WriteLine($"Destino: PostgreSQL ({pgConnection.Host}:{pgConnection.Port}/{pgConnection.Database})");
                     Console.WriteLine();
 
-                    // Desactivar triggers FK durante migración
-                    ExecutePg(pgConnection, "SET session_replication_role = 'replica';");
+                    // Borrado previo para recarga limpia (orden respetando FKs)
+                    PurgeTargetTables(pgConnection);
 
                     // Orden de migración respeta dependencias FK
                     MigrateUsuarios(ceConnection, pgConnection);
-                    MigrateLogins(ceConnection, pgConnection);
                     MigrateSocios(ceConnection, pgConnection);
-                    MigrateSocioDetalles(ceConnection, pgConnection);
-                    MigrateUserLogins(ceConnection, pgConnection);
+
                     MigrateFamilias(ceConnection, pgConnection);
                     MigrateArticulos(ceConnection, pgConnection);
+
+                    // Recuperar huérfanos (crear padres ficticios para FKs rotas)
+                    RecoverOrphans(ceConnection, pgConnection);
+
+                    // Resolver ReferidoPor (ahora que ya existen posibles huérfanos recuperados)
+                    ResolveReferidos(pgConnection);
+
+                    MigrateSocioDetalles(ceConnection, pgConnection);
+                    MigrateUserLogins(ceConnection, pgConnection);
                     MigrateAportaciones(ceConnection, pgConnection);
                     MigrateRetiradas(ceConnection, pgConnection);
                     MigrateCuotas(ceConnection, pgConnection);
                     MigrateAccesos(ceConnection, pgConnection);
                     MigrateBorrados(ceConnection, pgConnection);
 
-                    // Reactivar triggers FK
-                    ExecutePg(pgConnection, "SET session_replication_role = 'origin';");
+                    // Asegurar admin tras borrado (cascade delete lo elimina al borrar usuarios)
+                    CreateAdminUser(pgConnection);
 
                     // Ajustar secuencias SERIAL al máximo ID insertado
                     ResetSequences(pgConnection);
@@ -129,7 +145,10 @@ namespace MigradorDatos
                 {
                     using (var cmd = new NpgsqlCommand(sql, pg))
                     {
-                        cmd.Parameters.AddWithValue("@Id", (long)reader["IdUsuario"]);
+                        long id = (long)reader["IdUsuario"];
+                        _usuarioIds.Add(id);
+
+                        cmd.Parameters.AddWithValue("@Id", id);
                         cmd.Parameters.AddWithValue("@Nombre", reader["Nombre"]?.ToString() ?? "");
                         cmd.Parameters.AddWithValue("@Apellidos", reader["Apellidos"]?.ToString() ?? "");
                         cmd.Parameters.AddWithValue("@TipoDocumento", reader["TipoDocumento"]?.ToString() ?? "DNI");
@@ -153,39 +172,6 @@ namespace MigradorDatos
         }
 
         // ════════════════════════════════════════════
-        // LOGINS (passwords en texto plano → SHA-256)
-        // ════════════════════════════════════════════
-        static void MigrateLogins(SqlCeConnection ce, NpgsqlConnection pg)
-        {
-            var sql = @"INSERT INTO ""Logins"" 
-                (""Id"", ""UsuarioId"", ""NombreUsuario"", ""PasswordHash"", ""IsActive"", ""CreatedAt"")
-                VALUES (@Id, @UsuarioId, @Nombre, @Hash, TRUE, @Now)
-                ON CONFLICT (""Id"") DO NOTHING";
-
-            int count = 0;
-            using (var reader = ReadCe(ce, "SELECT * FROM Login"))
-            {
-                while (reader.Read())
-                {
-                    string plainPass = reader["Password"]?.ToString() ?? "";
-                    string hash = HashPassword(plainPass);
-
-                    using (var cmd = new NpgsqlCommand(sql, pg))
-                    {
-                        cmd.Parameters.AddWithValue("@Id", (long)reader["IdLogin"]);
-                        cmd.Parameters.AddWithValue("@UsuarioId", (long)reader["IdUsuario"]);
-                        cmd.Parameters.AddWithValue("@Nombre", reader["NombreUsuario"]?.ToString() ?? "");
-                        cmd.Parameters.AddWithValue("@Hash", hash);
-                        cmd.Parameters.AddWithValue("@Now", DateTime.UtcNow);
-                        cmd.ExecuteNonQuery();
-                        count++;
-                    }
-                }
-            }
-            LogTable("Logins", count);
-        }
-
-        // ════════════════════════════════════════════
         // SOCIOS
         // ════════════════════════════════════════════
         static void MigrateSocios(SqlCeConnection ce, NpgsqlConnection pg)
@@ -206,8 +192,11 @@ namespace MigradorDatos
                  @Comentario, @Activo, @FechaAlta)
                 ON CONFLICT (""Id"") DO NOTHING";
 
-            var codigoToId = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-            var referidoPorMap = new Dictionary<long, string>();
+            // Limpiar mapas estáticos por si acaso
+            _referidoPorMap.Clear();
+            _codigoToId.Clear();
+            _nombreToId.Clear();
+            _numSocioToId.Clear();
 
             int count = 0;
             using (var reader = ReadCe(ce, "SELECT * FROM Socio"))
@@ -216,22 +205,32 @@ namespace MigradorDatos
                 {
                     long id = (long)reader["IdSocio"];
                     string codigo = CleanText(reader["Codigo"]) ?? "";
-                    string referidoPor = CleanText(reader["ReferidoPor"]);
+                    string nombre = CleanText(reader["Nombre"]) ?? "";
+                    string ap1 = CleanText(reader["PrimerApellido"]) ?? "";
+                    string ap2 = CleanText(reader["SegundoApellido"]) ?? "";
+                    string nombreCompleto = $"{nombre} {ap1} {ap2}".Trim();
+                    int numSocio = (int)reader["NumSocio"];
 
-                    if (!string.IsNullOrWhiteSpace(codigo))
-                        codigoToId[codigo] = id;
+                    // Buscar columna ReferidoPor con varios nombres posibles
+                    string referidoPor = ReadText(reader, "ReferidoPor", "Referido_Por", "IdReferido", "Referido Por", "CodigoReferidoPor", "Referido");
+
+                    if (!string.IsNullOrWhiteSpace(codigo)) _codigoToId[codigo] = id;
+                    if (!string.IsNullOrWhiteSpace(nombreCompleto)) _nombreToId[nombreCompleto] = id;
+                    _numSocioToId[numSocio] = id;
 
                     if (!string.IsNullOrWhiteSpace(referidoPor))
-                        referidoPorMap[id] = referidoPor;
+                        _referidoPorMap[id] = referidoPor;
+
+                    _socioIds.Add(id);
 
                     using (var cmd = new NpgsqlCommand(sql, pg))
                     {
                         cmd.Parameters.AddWithValue("@Id", id);
-                        cmd.Parameters.AddWithValue("@NumSocio", (int)reader["NumSocio"]);
+                        cmd.Parameters.AddWithValue("@NumSocio", numSocio);
                         cmd.Parameters.AddWithValue("@Codigo", codigo);
-                        cmd.Parameters.AddWithValue("@Nombre", CleanText(reader["Nombre"]));
-                        cmd.Parameters.AddWithValue("@Ap1", CleanText(reader["PrimerApellido"]));
-                        cmd.Parameters.AddWithValue("@Ap2", OrNull(CleanText(reader["SegundoApellido"])));
+                        cmd.Parameters.AddWithValue("@Nombre", nombre);
+                        cmd.Parameters.AddWithValue("@Ap1", ap1);
+                        cmd.Parameters.AddWithValue("@Ap2", OrNull(ap2));
                         cmd.Parameters.AddWithValue("@TipoDoc", CleanText(reader["TipoDocumento"]) ?? "DNI");
                         cmd.Parameters.AddWithValue("@Doc", CleanText(reader["Documento"])) ;
                         cmd.Parameters.AddWithValue("@Pais", OrNull(CleanText(reader["Pais"])));
@@ -246,7 +245,10 @@ namespace MigradorDatos
                         cmd.Parameters.AddWithValue("@Foto", PrefixPath(CleanText(reader["Foto"]), "/resources/fotos/"));
                         cmd.Parameters.AddWithValue("@FotoDniA", PrefixPath(CleanText(reader["FotoAnversoDNI"]), "/resources/documentos/"));
                         cmd.Parameters.AddWithValue("@FotoDniR", PrefixPath(CleanText(reader["FotoReversoDNI"]), "/resources/documentos/"));
-                        cmd.Parameters.AddWithValue("@Estrellas", (short)reader["NEstrellas"]);
+                        
+                        // Buscar Estrellas con varios nombres posibles
+                        cmd.Parameters.AddWithValue("@Estrellas", ReadShort(reader, "NEstrellas", "N_Estrellas", "Estrellas", "NumeroEstrellas", "Stars"));
+                        
                         cmd.Parameters.AddWithValue("@ConsMax", (int)reader["ConsumicionMaxima"]);
                         cmd.Parameters.AddWithValue("@Terap", (bool)reader["Terapeutica"]);
                         cmd.Parameters.AddWithValue("@Exento", (bool)reader["Exento"]);
@@ -259,20 +261,50 @@ namespace MigradorDatos
                 }
             }
 
-            // Resolver ReferidoPor: código→SocioId
+            LogTable("Socios", count);
+        }
+
+        // ════════════════════════════════════════════
+        // RESOLVER REFERIDOS
+        // ════════════════════════════════════════════
+        static void ResolveReferidos(NpgsqlConnection pg)
+        {
+            Console.WriteLine("  Resolviendo campo 'ReferidoPor'...");
+
             int refs = 0;
-            foreach (var kv in referidoPorMap)
+            int failed = 0;
+            foreach (var kv in _referidoPorMap)
             {
-                if (codigoToId.TryGetValue(kv.Value, out long refId))
+                long refId = 0;
+                string refValue = kv.Value.Trim();
+
+                // 1. Por Código
+                if (_codigoToId.TryGetValue(refValue, out long byCode)) refId = byCode;
+                // 2. Por ID directo (si es número)
+                else if (long.TryParse(refValue, out long byId) && _socioIds.Contains(byId)) refId = byId;
+                // 3. Por NumSocio (si es número)
+                else if (int.TryParse(refValue, out int byNum) && _numSocioToId.TryGetValue(byNum, out long byNumId)) refId = byNumId;
+                // 4. Por Nombre Completo
+                else if (_nombreToId.TryGetValue(refValue, out long byName)) refId = byName;
+
+                if (refId != 0)
                 {
                     ExecutePg(pg, @"UPDATE ""Socios"" SET ""ReferidoPorSocioId"" = @ref WHERE ""Id"" = @id",
                         ("@ref", (object)refId), ("@id", (object)kv.Key));
                     refs++;
                 }
+                else
+                {
+                    failed++;
+                    if (failed <= 5) Console.WriteLine($"      ⚠ No se pudo resolver 'ReferidoPor': '{refValue}' (SocioId: {kv.Key})");
+                }
             }
 
-            LogTable("Socios", count);
-            if (refs > 0) Console.WriteLine($"    └─ {refs} referencias 'ReferidoPor' resueltas");
+            if (_referidoPorMap.Count > 0)
+            {
+                Console.WriteLine($"    └─ {refs} resueltos, {failed} no encontrados (de {_referidoPorMap.Count})");
+            }
+            Console.WriteLine();
         }
 
         // ════════════════════════════════════════════
@@ -293,9 +325,16 @@ namespace MigradorDatos
             {
                 while (reader.Read())
                 {
+                    long socioId = (long)reader["IdSocio"];
+                    if (!_socioIds.Contains(socioId))
+                    {
+                        Console.WriteLine($"  ⚠ SocioDetalle para Socio {socioId} saltado: Socio sigue sin existir tras recuperación.");
+                        continue; 
+                    }
+
                     using (var cmd = new NpgsqlCommand(sql, pg))
                     {
-                        cmd.Parameters.AddWithValue("@SocioId", (long)reader["IdSocio"]);
+                        cmd.Parameters.AddWithValue("@SocioId", socioId);
                         cmd.Parameters.AddWithValue("@CuotaProx", OrNullDate(reader["CuotaFechaProxima"]));
                         cmd.Parameters.AddWithValue("@ConsMes", ToDecimal(reader["ConsumicionDelMes"]));
                         cmd.Parameters.AddWithValue("@AporDia", OrNullDecimal(reader["AportacionDelDia"]));
@@ -327,6 +366,13 @@ namespace MigradorDatos
             {
                 while (reader.Read())
                 {
+                    long socioId = (long)reader["IdSocio"];
+                    if (!_socioIds.Contains(socioId))
+                    {
+                        Console.WriteLine($"  ⚠ UserLogin {reader["IdUserLogin"]} saltado: Socio {socioId} no existe.");
+                        continue;
+                    }
+
                     string plainPass = reader["Userpassword"]?.ToString() ?? "";
                     string hash = HashPassword(plainPass);
                     string mode = reader["Usermode"]?.ToString() ?? "socio";
@@ -339,7 +385,7 @@ namespace MigradorDatos
                         cmd.Parameters.AddWithValue("@Hash", hash);
                         cmd.Parameters.AddWithValue("@Rol", rol);
                         cmd.Parameters.AddWithValue("@FechaAlta", (DateTime)reader["FechaAlta"]);
-                        cmd.Parameters.AddWithValue("@SocioId", (long)reader["IdSocio"]);
+                        cmd.Parameters.AddWithValue("@SocioId", socioId);
                         cmd.ExecuteNonQuery();
                         count++;
                     }
@@ -393,9 +439,12 @@ namespace MigradorDatos
             {
                 while (reader.Read())
                 {
+                    long id = (long)reader["IdArticulo"];
+                    _articuloIds.Add(id);
+
                     using (var cmd = new NpgsqlCommand(sql, pg))
                     {
-                        cmd.Parameters.AddWithValue("@Id", (long)reader["IdArticulo"]);
+                        cmd.Parameters.AddWithValue("@Id", id);
                         cmd.Parameters.AddWithValue("@FamId", (long)reader["IdFamilia"]);
                         cmd.Parameters.AddWithValue("@Nombre", reader["Nombre"]?.ToString() ?? "");
                         cmd.Parameters.AddWithValue("@Desc", OrNull(reader["Descripcion"]));
@@ -416,6 +465,139 @@ namespace MigradorDatos
         }
 
         // ════════════════════════════════════════════
+        // RECUPERACIÓN DE HUÉRFANOS
+        // ════════════════════════════════════════════
+        static void RecoverOrphans(SqlCeConnection ce, NpgsqlConnection pg)
+        {
+            Console.WriteLine("  Analizando integridad referencial y recuperando huérfanos...");
+            
+            // 1. Recolectar referencias usadas en tablas hijas
+            var usedSocioIds = new HashSet<long>();
+            var usedUsuarioIds = new HashSet<long>();
+            var usedArticuloIds = new HashSet<long>();
+
+            // Añadir también los IDs de referidos si son numéricos (para recuperar socios antiguos borrados que siguen referenciados)
+            foreach (var val in _referidoPorMap.Values)
+            {
+                if (long.TryParse(val, out long idRef)) usedSocioIds.Add(idRef);
+            }
+
+            // Helper local para acumular
+            void ScanTable(string query, string colSocio, string colUser, string colArt)
+            {
+                using (var reader = ReadCe(ce, query))
+                {
+                    while (reader.Read())
+                    {
+                        if (colSocio != null && reader[colSocio] != DBNull.Value) usedSocioIds.Add(Convert.ToInt64(reader[colSocio]));
+                        if (colUser != null && reader[colUser] != DBNull.Value) usedUsuarioIds.Add(Convert.ToInt64(reader[colUser]));
+                        if (colArt != null && reader[colArt] != DBNull.Value) usedArticuloIds.Add(Convert.ToInt64(reader[colArt]));
+                    }
+                }
+            }
+
+            // Escaneo
+            try { ScanTable("SELECT IdSocio FROM TablaAuxiliarSocio", "IdSocio", null, null); } catch { }
+            try { ScanTable("SELECT IdSocio, IdUsuario FROM Aportacion", "IdSocio", "IdUsuario", null); } catch { }
+            try { ScanTable("SELECT IdSocio, IdUsuario, IdArticulo FROM Retirada", "IdSocio", "IdUsuario", "IdArticulo"); } catch { }
+            try { ScanTable("SELECT IdSocio, IdUsuario FROM Cuota", "IdSocio", "IdUsuario", null); } catch { }
+            try { ScanTable("SELECT IdSocio FROM Acceso", "IdSocio", null, null); } catch { }
+            try { ScanTable("SELECT IdSocio FROM UserLogin", "IdSocio", null, null); } catch { }
+
+            // 2. Crear Socios Faltantes
+            int sociosRec = 0;
+            foreach (var id in usedSocioIds)
+            {
+                if (!_socioIds.Contains(id))
+                {
+                    // Insertar socio placeholder
+                    var sql = @"INSERT INTO ""Socios"" 
+                        (""Id"", ""NumSocio"", ""Codigo"", ""Nombre"", ""PrimerApellido"", ""TipoDocumento"", ""Documento"", ""FechaAlta"", ""IsActive"", ""CreatedAt"")
+                        VALUES 
+                        (@Id, @Num, @Cod, @Nom, @Ap1, 'DNI', @Doc, @Now, FALSE, @Now)
+                        ON CONFLICT (""Id"") DO NOTHING";
+                    
+                    ExecutePg(pg, sql, 
+                        ("@Id", id),
+                        ("@Num", (int)(900000 + id)), // NumSocio ficticio alto
+                        ("@Cod", $"REC-{id}"),
+                        ("@Nom", $"Socio Recuperado {id}"),
+                        ("@Ap1", "(Datos perdidos)"),
+                        ("@Doc", $"REC-{id}"),
+                        ("@Now", DateTime.UtcNow)
+                    );
+                    
+                    _socioIds.Add(id);
+                    sociosRec++;
+                }
+            }
+            if (sociosRec > 0) Console.WriteLine($"    └─ Recuperados {sociosRec} Socios huérfanos (marcados como inactivos)");
+
+            // 3. Crear Usuarios Faltantes
+            int usersRec = 0;
+            foreach (var id in usedUsuarioIds)
+            {
+                if (!_usuarioIds.Contains(id))
+                {
+                    var sql = @"INSERT INTO ""Usuarios"" 
+                        (""Id"", ""Nombre"", ""Apellidos"", ""TipoDocumento"", ""Documento"", ""FechaAlta"", ""IsActive"", ""CreatedAt"")
+                        VALUES 
+                        (@Id, @Nom, @Ap, 'DNI', @Doc, @Now, FALSE, @Now)
+                        ON CONFLICT (""Id"") DO NOTHING";
+
+                    ExecutePg(pg, sql,
+                        ("@Id", id),
+                        ("@Nom", $"Usuario Recuperado {id}"),
+                        ("@Ap", "(Origen desconocido)"),
+                        ("@Doc", $"USR-{id}"),
+                        ("@Now", DateTime.UtcNow)
+                    );
+
+                    _usuarioIds.Add(id);
+                    usersRec++;
+                }
+            }
+            if (usersRec > 0) Console.WriteLine($"    └─ Recuperados {usersRec} Usuarios huérfanos");
+
+            // 4. Crear Articulos Faltantes
+            int artsRec = 0;
+            long familiaRecId = 9999;
+            bool familiaCreated = false;
+
+            foreach (var id in usedArticuloIds)
+            {
+                if (!_articuloIds.Contains(id))
+                {
+                    if (!familiaCreated)
+                    {
+                        // Crear familia para artículos recuperados si no existe
+                        ExecutePg(pg, @"INSERT INTO ""Familias"" (""Id"", ""Nombre"", ""IsActive"", ""CreatedAt"") 
+                            VALUES (@Id, 'Recuperados', FALSE, NOW()) ON CONFLICT (""Id"") DO NOTHING", 
+                            ("@Id", familiaRecId));
+                        familiaCreated = true;
+                    }
+
+                    var sql = @"INSERT INTO ""Articulos"" 
+                        (""Id"", ""FamiliaId"", ""Nombre"", ""Descripcion"", ""Precio"", ""Cantidad1"", ""EsDecimal"", ""IsActive"", ""CreatedAt"")
+                        VALUES 
+                        (@Id, @FamId, @Nom, 'Recuperado por integridad referencial', 0, 0, FALSE, FALSE, NOW())
+                        ON CONFLICT (""Id"") DO NOTHING";
+
+                    ExecutePg(pg, sql,
+                        ("@Id", id),
+                        ("@FamId", familiaRecId),
+                        ("@Nom", $"Articulo {id} (Recuperado)")
+                    );
+
+                    _articuloIds.Add(id);
+                    artsRec++;
+                }
+            }
+            if (artsRec > 0) Console.WriteLine($"    └─ Recuperados {artsRec} Artículos huérfanos (en familia 'Recuperados')");
+            Console.WriteLine();
+        }
+
+        // ════════════════════════════════════════════
         // APORTACIONES
         // ════════════════════════════════════════════
         static void MigrateAportaciones(SqlCeConnection ce, NpgsqlConnection pg)
@@ -430,11 +612,20 @@ namespace MigradorDatos
             {
                 while (reader.Read())
                 {
+                    long socioId = (long)reader["IdSocio"];
+                    long usuarioId = (long)reader["IdUsuario"];
+
+                    if (!_socioIds.Contains(socioId) || !_usuarioIds.Contains(usuarioId))
+                    {
+                        Console.WriteLine($"  ⚠ Aportación {reader["IdAportacion"]} saltada: Socio {socioId} o Usuario {usuarioId} no existen tras recuperación.");
+                        continue;
+                    }
+
                     using (var cmd = new NpgsqlCommand(sql, pg))
                     {
                         cmd.Parameters.AddWithValue("@Id", (long)reader["IdAportacion"]);
-                        cmd.Parameters.AddWithValue("@SocioId", (long)reader["IdSocio"]);
-                        cmd.Parameters.AddWithValue("@UsuarioId", (long)reader["IdUsuario"]);
+                        cmd.Parameters.AddWithValue("@SocioId", socioId);
+                        cmd.Parameters.AddWithValue("@UsuarioId", usuarioId);
                         cmd.Parameters.AddWithValue("@Cantidad", ToDecimal(reader["CantidadAportada"]));
                         cmd.Parameters.AddWithValue("@Fecha", (DateTime)reader["Fecha"]);
                         cmd.Parameters.AddWithValue("@Codigo", reader["Codigo"]?.ToString() ?? "");
@@ -461,12 +652,22 @@ namespace MigradorDatos
             {
                 while (reader.Read())
                 {
+                    long socioId = (long)reader["IdSocio"];
+                    long artId = (long)reader["IdArticulo"];
+                    long usrId = (long)reader["IdUsuario"];
+
+                    if (!_socioIds.Contains(socioId) || !_articuloIds.Contains(artId) || !_usuarioIds.Contains(usrId))
+                    {
+                        Console.WriteLine($"  ⚠ Retirada {reader["IdRetirada"]} saltada por FK faltante.");
+                        continue;
+                    }
+
                     using (var cmd = new NpgsqlCommand(sql, pg))
                     {
                         cmd.Parameters.AddWithValue("@Id", (long)reader["IdRetirada"]);
-                        cmd.Parameters.AddWithValue("@SocioId", (long)reader["IdSocio"]);
-                        cmd.Parameters.AddWithValue("@ArtId", (long)reader["IdArticulo"]);
-                        cmd.Parameters.AddWithValue("@UsrId", (long)reader["IdUsuario"]);
+                        cmd.Parameters.AddWithValue("@SocioId", socioId);
+                        cmd.Parameters.AddWithValue("@ArtId", artId);
+                        cmd.Parameters.AddWithValue("@UsrId", usrId);
                         cmd.Parameters.AddWithValue("@Precio", ToDecimal(reader["PrecioArticulo"]));
                         cmd.Parameters.AddWithValue("@Cant", ToDecimal(reader["Cantidad"]));
                         cmd.Parameters.AddWithValue("@Total", ToDecimal(reader["Total"]));
@@ -495,14 +696,23 @@ namespace MigradorDatos
             {
                 while (reader.Read())
                 {
+                    long socioId = (long)reader["IdSocio"];
+                    long usrId = (long)reader["IdUsuario"];
+
+                    if (!_socioIds.Contains(socioId) || !_usuarioIds.Contains(usrId))
+                    {
+                        Console.WriteLine($"  ⚠ Cuota {reader["IdCuota"]} saltada por FK faltante.");
+                        continue;
+                    }
+
                     using (var cmd = new NpgsqlCommand(sql, pg))
                     {
                         cmd.Parameters.AddWithValue("@Id", (long)reader["IdCuota"]);
-                        cmd.Parameters.AddWithValue("@SocioId", (long)reader["IdSocio"]);
+                        cmd.Parameters.AddWithValue("@SocioId", socioId);
                         cmd.Parameters.AddWithValue("@Fecha", (DateTime)reader["Fecha"]);
                         cmd.Parameters.AddWithValue("@Cant", (int)reader["CantidadCuota"]);
                         cmd.Parameters.AddWithValue("@Per", (int)reader["Periodo"]);
-                        cmd.Parameters.AddWithValue("@UsrId", (long)reader["IdUsuario"]);
+                        cmd.Parameters.AddWithValue("@UsrId", usrId);
                         cmd.Parameters.AddWithValue("@FechaAnt", (DateTime)reader["FechaAnterior"]);
                         cmd.ExecuteNonQuery();
                         count++;
@@ -527,10 +737,17 @@ namespace MigradorDatos
             {
                 while (reader.Read())
                 {
+                    long socioId = (long)reader["IdSocio"];
+                    if (!_socioIds.Contains(socioId))
+                    {
+                        Console.WriteLine($"  ⚠ Acceso {reader["IdAcceso"]} saltado por FK faltante.");
+                        continue;
+                    }
+
                     using (var cmd = new NpgsqlCommand(sql, pg))
                     {
                         cmd.Parameters.AddWithValue("@Id", (long)reader["IdAcceso"]);
-                        cmd.Parameters.AddWithValue("@SocioId", (long)reader["IdSocio"]);
+                        cmd.Parameters.AddWithValue("@SocioId", socioId);
                         cmd.Parameters.AddWithValue("@Tipo", reader["TipoAcceso"]?.ToString() ?? "");
                         cmd.Parameters.AddWithValue("@Fecha", (DateTime)reader["FechaYHora"]);
                         cmd.Parameters.AddWithValue("@Turno", OrNull(reader["Turno"]));
@@ -587,6 +804,106 @@ namespace MigradorDatos
                 Console.WriteLine("  ⚠ Tabla 'Borrado' no encontrada en .sdf, saltando...");
             }
             LogTable("RegistrosBorrados", count);
+        }
+
+        // ════════════════════════════════════════════
+        // BORRADO PREVIO (orden por dependencias FK)
+        // ════════════════════════════════════════════
+        static void PurgeTargetTables(NpgsqlConnection pg)
+        {
+            Console.WriteLine("  Limpiando tablas de destino...");
+
+            // Hijas -> Padres. Logins NO se toca por petición.
+            string[] deleteOrder =
+            {
+                "RefreshTokens",
+                "Accesos",
+                "Cuotas",
+                "Retiradas",
+                "Aportaciones",
+                "RegistrosBorrados",
+                "UserLogins",
+                "SocioDetalles",
+                "Articulos",
+                "Familias",
+                "Socios",
+                "Usuarios"
+            };
+
+            foreach (var table in deleteOrder)
+            {
+                ExecutePg(pg, $@"DELETE FROM ""{table}"";");
+            }
+
+            Console.WriteLine("  ✓ Tablas limpiadas");
+            Console.WriteLine();
+        }
+
+        // ════════════════════════════════════════════
+        // CREAR ADMIN
+        // ════════════════════════════════════════════
+        static void CreateAdminUser(NpgsqlConnection pg)
+        {
+            Console.WriteLine("  Asegurando usuario 'admin'...");
+
+            // 1. Buscar o Crear Usuario Admin
+            long userId = 0;
+            using (var cmd = new NpgsqlCommand(@"SELECT ""Id"" FROM ""Usuarios"" WHERE ""Documento"" = '00000000A'", pg))
+            {
+                var res = cmd.ExecuteScalar();
+                if (res != null && res != DBNull.Value)
+                {
+                    userId = Convert.ToInt64(res);
+                }
+                else
+                {
+                    // Calcular siguiente ID
+                    using (var maxCmd = new NpgsqlCommand(@"SELECT COALESCE(MAX(""Id""), 0) FROM ""Usuarios""", pg))
+                    {
+                        userId = Convert.ToInt64(maxCmd.ExecuteScalar()) + 1;
+                    }
+
+                    var insertUser = @"INSERT INTO ""Usuarios"" 
+                        (""Id"", ""Nombre"", ""Apellidos"", ""TipoDocumento"", ""Documento"", ""FechaAlta"", ""IsActive"", ""CreatedAt"")
+                        VALUES 
+                        (@Id, 'Admin', 'Sistema', 'DNI', '00000000A', NOW(), TRUE, NOW())";
+                    
+                    ExecutePg(pg, insertUser, ("@Id", userId));
+                }
+            }
+
+            // 2. Crear Login Admin
+            using (var cmd = new NpgsqlCommand(@"SELECT ""Id"" FROM ""Logins"" WHERE ""NombreUsuario"" = 'admin'", pg))
+            {
+                var res = cmd.ExecuteScalar();
+                if (res == null || res == DBNull.Value)
+                {
+                     // Hash de "admin"
+                     var hash = "jGl25bVBBBW96Qi9Te4V37Fnqchz/Eu4qB9vKrRIqRg=";
+                     
+                     long loginId = 0;
+                     using (var maxCmd = new NpgsqlCommand(@"SELECT COALESCE(MAX(""Id""), 0) FROM ""Logins""", pg))
+                     {
+                        loginId = Convert.ToInt64(maxCmd.ExecuteScalar()) + 1;
+                     }
+
+                     var insertLogin = @"INSERT INTO ""Logins"" 
+                        (""Id"", ""UsuarioId"", ""NombreUsuario"", ""PasswordHash"", ""IsActive"", ""CreatedAt"")
+                        VALUES 
+                        (@Id, @UserId, 'admin', @Hash, TRUE, NOW())";
+
+                     ExecutePg(pg, insertLogin, 
+                        ("@Id", loginId),
+                        ("@UserId", userId),
+                        ("@Hash", hash));
+                        
+                     Console.WriteLine($"    └─ Creado usuario 'admin' (pass: admin)");
+                }
+                else
+                {
+                     Console.WriteLine($"    └─ Usuario 'admin' ya existe");
+                }
+            }
         }
 
         // ════════════════════════════════════════════
@@ -669,6 +986,38 @@ namespace MigradorDatos
         {
             if (val == null || val == DBNull.Value) return DBNull.Value;
             return Convert.ToInt64(val);
+        }
+
+        static bool HasColumn(IDataRecord reader, string columnName)
+        {
+            for (int i = 0; i < reader.FieldCount; i++)
+            {
+                if (reader.GetName(i).Equals(columnName, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        static string ReadText(IDataRecord reader, params string[] candidates)
+        {
+            foreach (var c in candidates)
+            {
+                if (!HasColumn(reader, c)) continue;
+                return CleanText(reader[c]);
+            }
+            return null;
+        }
+
+        static short ReadShort(IDataRecord reader, params string[] candidates)
+        {
+            foreach (var c in candidates)
+            {
+                if (!HasColumn(reader, c)) continue;
+                var val = reader[c];
+                if (val == null || val == DBNull.Value) return 0;
+                return Convert.ToInt16(val);
+            }
+            return 0;
         }
 
         // Elimina caracteres fuera de WIN1252 (ej. emojis) para evitar errores de codificación

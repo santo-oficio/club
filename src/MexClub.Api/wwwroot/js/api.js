@@ -218,6 +218,7 @@ var MexClubApi = (function () {
         },
         createRetirada: function (data) { return request("POST", "/retiradas", data); },
         createRetiradaBatch: function (data) { return request("POST", "/retiradas/batch", data); },
+        deleteRetirada: function (id) { return request("DELETE", "/retiradas/" + id); },
 
         getDashboard: function () { return request("GET", "/dashboard"); },
 

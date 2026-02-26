@@ -294,15 +294,17 @@ public class RetiradasController : ControllerBase
     private readonly IRepository<Socio> _socioRepo;
     private readonly IRepository<Articulo> _articuloRepo;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly IConfiguration _config;
 
     public RetiradasController(
         IRepository<Retirada> retiradaRepo, IRepository<Socio> socioRepo,
-        IRepository<Articulo> articuloRepo, IUnitOfWork unitOfWork)
+        IRepository<Articulo> articuloRepo, IUnitOfWork unitOfWork, IConfiguration config)
     {
         _retiradaRepo = retiradaRepo;
         _socioRepo = socioRepo;
         _articuloRepo = articuloRepo;
         _unitOfWork = unitOfWork;
+        _config = config;
     }
 
     [HttpGet]
@@ -327,7 +329,8 @@ public class RetiradasController : ControllerBase
     [Authorize(Policy = "Admin")]
     public async Task<ActionResult<ServiceResult<RetiradaDto>>> Create([FromBody] CreateRetiradaRequest request, CancellationToken ct)
     {
-        var socio = await _socioRepo.Query().Include(s => s.Detalle).FirstOrDefaultAsync(s => s.Id == request.SocioId, ct);
+        // Tracked query: necesario para persistir cambios de Detalle (Aprovechable/ConsumicionDelMes)
+        var socio = await _socioRepo.Query().AsTracking().Include(s => s.Detalle).FirstOrDefaultAsync(s => s.Id == request.SocioId, ct);
         if (socio == null) return NotFound(ServiceResult.Fail("Socio no encontrado."));
 
         var articulo = await _articuloRepo.GetByIdAsync(request.ArticuloId, ct);
@@ -335,8 +338,18 @@ public class RetiradasController : ControllerBase
 
         var total = articulo.Precio * request.Cantidad;
 
-        if (socio.Detalle != null && socio.Detalle.Aprovechable < total)
-            return BadRequest(ServiceResult.Fail($"Saldo insuficiente. Disponible: {socio.Detalle.Aprovechable:F2} €, Necesario: {total:F2} €"));
+        if (socio.Detalle != null)
+        {
+            if (socio.Detalle.Aprovechable < total)
+                return BadRequest(ServiceResult.Fail($"Saldo insuficiente. Disponible: {socio.Detalle.Aprovechable:F2} €, Necesario: {total:F2} €"));
+
+            if (socio.ConsumicionMaximaMensual > 0 && (socio.Detalle.ConsumicionDelMes + request.Cantidad) > socio.ConsumicionMaximaMensual)
+                return BadRequest(ServiceResult.Fail("Límite mensual excedido."));
+        }
+
+        var firmaUrl = await SaveSignatureAndGetUrlAsync(request.FirmaBase64, request.SocioId, request.UsuarioId, ct);
+        if (string.IsNullOrWhiteSpace(firmaUrl))
+            return BadRequest(ServiceResult.Fail("Firma inválida."));
 
         var retirada = new Retirada
         {
@@ -346,7 +359,7 @@ public class RetiradasController : ControllerBase
             PrecioArticulo = articulo.Precio,
             Cantidad = request.Cantidad,
             Total = total,
-            FirmaUrl = request.FirmaBase64,
+            FirmaUrl = firmaUrl,
             Fecha = DateTime.UtcNow
         };
 
@@ -356,9 +369,7 @@ public class RetiradasController : ControllerBase
             await _retiradaRepo.AddAsync(retirada, ct);
             if (socio.Detalle != null)
             {
-                socio.Detalle.Aprovechable -= total;
-                socio.Detalle.ConsumicionDelMes += total;
-                socio.Detalle.FechaUltimaConsumicion = DateTime.UtcNow;
+                ApplyRetiradaToSocioDetalle(socio.Detalle, total, request.Cantidad, DateTime.UtcNow);
             }
             await _unitOfWork.SaveChangesAsync(ct);
             await _unitOfWork.CommitTransactionAsync(ct);
@@ -378,14 +389,19 @@ public class RetiradasController : ControllerBase
     [Authorize(Policy = "Admin")]
     public async Task<ActionResult<ServiceResult<List<RetiradaDto>>>> CreateBatch([FromBody] CreateRetiradaListRequest request, CancellationToken ct)
     {
-        var socio = await _socioRepo.Query().Include(s => s.Detalle).FirstOrDefaultAsync(s => s.Id == request.SocioId, ct);
+        // Tracked query: necesario para persistir cambios de Detalle tras lote de retiradas
+        var socio = await _socioRepo.Query().AsTracking().Include(s => s.Detalle).FirstOrDefaultAsync(s => s.Id == request.SocioId, ct);
         if (socio == null) return NotFound(ServiceResult.Fail("Socio no encontrado."));
 
         var articuloIds = request.Items.Select(i => i.ArticuloId).Distinct().ToList();
         var articulos = await _articuloRepo.Query().Where(a => articuloIds.Contains(a.Id)).ToDictionaryAsync(a => a.Id, ct);
+        var firmaUrl = await SaveSignatureAndGetUrlAsync(request.FirmaBase64, request.SocioId, request.UsuarioId, ct);
+        if (string.IsNullOrWhiteSpace(firmaUrl))
+            return BadRequest(ServiceResult.Fail("Firma inválida."));
 
         var retiradas = new List<Retirada>();
         decimal totalGeneral = 0;
+        decimal gramosTotales = 0;
 
         foreach (var item in request.Items)
         {
@@ -394,6 +410,7 @@ public class RetiradasController : ControllerBase
 
             var total = art.Precio * item.Cantidad;
             totalGeneral += total;
+            gramosTotales += item.Cantidad;
             retiradas.Add(new Retirada
             {
                 SocioId = request.SocioId,
@@ -402,13 +419,18 @@ public class RetiradasController : ControllerBase
                 PrecioArticulo = art.Precio,
                 Cantidad = item.Cantidad,
                 Total = total,
-                FirmaUrl = request.FirmaBase64,
+                FirmaUrl = firmaUrl,
                 Fecha = DateTime.UtcNow
             });
         }
 
-        if (socio.Detalle != null && socio.Detalle.Aprovechable < totalGeneral)
-            return BadRequest(ServiceResult.Fail($"Saldo insuficiente. Disponible: {socio.Detalle.Aprovechable:F2} €, Necesario: {totalGeneral:F2} €"));
+        if (socio.Detalle != null)
+        {
+            if (socio.Detalle.Aprovechable < totalGeneral)
+                return BadRequest(ServiceResult.Fail($"Saldo insuficiente. Disponible: {socio.Detalle.Aprovechable:F2} €, Necesario: {totalGeneral:F2} €"));
+
+            // En batch, el exceso de límite mensual se decide en frontend mediante advertencia explícita.
+        }
 
         await _unitOfWork.BeginTransactionAsync(ct);
         try
@@ -416,9 +438,7 @@ public class RetiradasController : ControllerBase
             foreach (var r in retiradas) await _retiradaRepo.AddAsync(r, ct);
             if (socio.Detalle != null)
             {
-                socio.Detalle.Aprovechable -= totalGeneral;
-                socio.Detalle.ConsumicionDelMes += totalGeneral;
-                socio.Detalle.FechaUltimaConsumicion = DateTime.UtcNow;
+                ApplyRetiradaToSocioDetalle(socio.Detalle, totalGeneral, gramosTotales, DateTime.UtcNow);
             }
             await _unitOfWork.SaveChangesAsync(ct);
             await _unitOfWork.CommitTransactionAsync(ct);
@@ -434,6 +454,129 @@ public class RetiradasController : ControllerBase
 
         return Ok(ServiceResult<List<RetiradaDto>>.Ok(dtos));
     }
+
+    [HttpDelete("{id:long}")]
+    [Authorize(Policy = "Admin")]
+    public async Task<ActionResult<ServiceResult>> Delete(long id, CancellationToken ct)
+    {
+        var retirada = await _retiradaRepo.Query().AsTracking().FirstOrDefaultAsync(r => r.Id == id, ct);
+        if (retirada == null) return NotFound(ServiceResult.Fail("Retirada no encontrada."));
+
+        var socio = await _socioRepo.Query().AsTracking().Include(s => s.Detalle).FirstOrDefaultAsync(s => s.Id == retirada.SocioId, ct);
+        if (socio == null) return NotFound(ServiceResult.Fail("Socio no encontrado."));
+
+        await _unitOfWork.BeginTransactionAsync(ct);
+        try
+        {
+            await _retiradaRepo.DeleteAsync(retirada, ct);
+
+            if (socio.Detalle != null)
+            {
+                socio.Detalle.Aprovechable += retirada.Total;
+
+                if (IsSameMonthYear(retirada.Fecha, DateTime.UtcNow))
+                {
+                    socio.Detalle.ConsumicionDelMes = Math.Max(0, socio.Detalle.ConsumicionDelMes - retirada.Cantidad);
+                }
+
+                var ultimaRetiradaRestante = await _retiradaRepo.Query()
+                    .Where(r => r.SocioId == retirada.SocioId && r.Id != retirada.Id)
+                    .OrderByDescending(r => r.Fecha)
+                    .Select(r => (DateTime?)r.Fecha)
+                    .FirstOrDefaultAsync(ct);
+
+                socio.Detalle.FechaUltimaConsumicion = ultimaRetiradaRestante;
+            }
+
+            await _unitOfWork.SaveChangesAsync(ct);
+            await _unitOfWork.CommitTransactionAsync(ct);
+        }
+        catch
+        {
+            await _unitOfWork.RollbackTransactionAsync(ct);
+            throw;
+        }
+
+        return Ok(ServiceResult.Ok("Retirada eliminada."));
+    }
+
+    private static void ApplyRetiradaToSocioDetalle(SocioDetalle detalle, decimal totalRetirada, decimal gramosRetirada, DateTime nowUtc)
+    {
+        // Mantiene el concepto "consumición del mes": si cambia de mes/año, reinicia acumulado.
+        if (!detalle.FechaUltimaConsumicion.HasValue
+            || detalle.FechaUltimaConsumicion.Value.Month != nowUtc.Month
+            || detalle.FechaUltimaConsumicion.Value.Year != nowUtc.Year)
+        {
+            detalle.ConsumicionDelMes = 0;
+        }
+
+        detalle.Aprovechable -= totalRetirada;
+        detalle.ConsumicionDelMes += gramosRetirada;
+        detalle.FechaUltimaConsumicion = nowUtc;
+    }
+
+    private static bool IsSameMonthYear(DateTime dt, DateTime nowUtc)
+        => dt.Month == nowUtc.Month && dt.Year == nowUtc.Year;
+
+    private async Task<string?> SaveSignatureAndGetUrlAsync(string? firmaBase64, long socioId, long usuarioId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(firmaBase64)) return null;
+
+        var input = firmaBase64.Trim();
+        if (!input.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
+        {
+            return input.Length <= 500 ? input : null;
+        }
+
+        var commaIndex = input.IndexOf(',');
+        if (commaIndex <= 0) return null;
+
+        var meta = input.Substring(5, commaIndex - 5); // image/png;base64
+        var payload = input[(commaIndex + 1)..];
+        if (string.IsNullOrWhiteSpace(payload)) return null;
+
+        byte[] bytes;
+        try
+        {
+            bytes = Convert.FromBase64String(payload);
+        }
+        catch
+        {
+            return null;
+        }
+
+        var slashIndex = meta.IndexOf('/');
+        var semicolonIndex = meta.IndexOf(';');
+        var imageType = (slashIndex >= 0 && semicolonIndex > slashIndex)
+            ? meta.Substring(slashIndex + 1, semicolonIndex - slashIndex - 1)
+            : "png";
+
+        var ext = imageType.ToLowerInvariant() switch
+        {
+            "jpg" => ".jpg",
+            "jpeg" => ".jpg",
+            "gif" => ".gif",
+            "bmp" => ".bmp",
+            "webp" => ".webp",
+            _ => ".png"
+        };
+
+        var basePath = _config["FileStorage:BasePath"] ?? "resources";
+        var requestPath = _config["FileStorage:RequestPath"] ?? "/resources";
+        var firmasSubfolder = _config["FileStorage:Subfolders:Firmas"] ?? "firmas";
+        var resourcesRoot = Path.IsPathRooted(basePath)
+            ? basePath
+            : Path.Combine(Directory.GetCurrentDirectory(), basePath);
+
+        var dir = Path.Combine(resourcesRoot, firmasSubfolder);
+        Directory.CreateDirectory(dir);
+
+        var fileName = $"firma_retirada_{socioId}_{usuarioId}_{DateTime.UtcNow.Ticks}{ext}";
+        var filePath = Path.Combine(dir, fileName);
+        await System.IO.File.WriteAllBytesAsync(filePath, bytes, ct);
+
+        return $"{requestPath}/{firmasSubfolder}/{fileName}";
+    }
 }
 
 [ApiController]
@@ -445,15 +588,18 @@ public class DashboardController : ControllerBase
     private readonly IRepository<Acceso> _accesoRepo;
     private readonly IRepository<Aportacion> _aportacionRepo;
     private readonly IRepository<Retirada> _retiradaRepo;
+    private readonly IRepository<Cuota> _cuotaRepo;
 
     public DashboardController(
         IRepository<Socio> socioRepo, IRepository<Acceso> accesoRepo,
-        IRepository<Aportacion> aportacionRepo, IRepository<Retirada> retiradaRepo)
+        IRepository<Aportacion> aportacionRepo, IRepository<Retirada> retiradaRepo,
+        IRepository<Cuota> cuotaRepo)
     {
         _socioRepo = socioRepo;
         _accesoRepo = accesoRepo;
         _aportacionRepo = aportacionRepo;
         _retiradaRepo = retiradaRepo;
+        _cuotaRepo = cuotaRepo;
     }
 
     [HttpGet]
@@ -467,8 +613,29 @@ public class DashboardController : ControllerBase
             .OrderByDescending(a => a.FechaHora).Take(20)
             .ToListAsync(ct);
 
-        var entradas = accesosHoy.Count(a => a.TipoAcceso == TipoAcceso.Entrada);
-        var salidas = accesosHoy.Count(a => a.TipoAcceso == TipoAcceso.Salida);
+        var sociosConAportacionHoy = await _aportacionRepo.Query()
+            .Where(a => a.Fecha >= hoy)
+            .Select(a => a.SocioId)
+            .Distinct()
+            .ToListAsync(ct);
+
+        var sociosConRetiradaHoy = await _retiradaRepo.Query()
+            .Where(r => r.Fecha >= hoy)
+            .Select(r => r.SocioId)
+            .Distinct()
+            .ToListAsync(ct);
+
+        var sociosConCuotaHoy = await _cuotaRepo.Query()
+            .Where(c => c.Fecha >= hoy)
+            .Select(c => c.SocioId)
+            .Distinct()
+            .ToListAsync(ct);
+
+        var visitasHoy = sociosConAportacionHoy
+            .Concat(sociosConRetiradaHoy)
+            .Concat(sociosConCuotaHoy)
+            .Distinct()
+            .Count();
 
         var ultimosAccesos = accesosHoy.Take(10).Select(a =>
             new AccesoDto(a.Id, a.SocioId, a.Socio.NombreCompleto, a.TipoAcceso.ToString(), a.FechaHora, a.Turno, a.Accion.ToString())).ToList();
@@ -488,7 +655,7 @@ public class DashboardController : ControllerBase
         var totalRetiradas = await _retiradaRepo.Query().SumAsync(r => r.Total, ct);
 
         return Ok(ServiceResult<DashboardDto>.Ok(new DashboardDto(
-            totalSocios, Math.Max(0, entradas - salidas), totalAportaciones, totalRetiradas,
+            totalSocios, visitasHoy, totalAportaciones, totalRetiradas,
             ultimosAccesos, ultimasAportaciones, ultimasRetiradas)));
     }
 }
