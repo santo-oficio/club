@@ -179,6 +179,7 @@ var MexClubApi = (function () {
         getArticulo: function (id) { return request("GET", "/articulos/" + id); },
         createArticulo: function (data) { return request("POST", "/articulos", data); },
         updateArticulo: function (id, data) { return request("PUT", "/articulos/" + id, data); },
+        deactivateArticulo: function (id) { return request("DELETE", "/articulos/" + id); },
 
         getAportaciones: function (page, pageSize, socioId) {
             return request("GET", "/aportaciones" + buildQuery({

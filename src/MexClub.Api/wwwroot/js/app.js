@@ -8,6 +8,7 @@ var MexClub = (function () {
     var _fichajeTimer = null;
     var _dashboardHoldTimer = null;
     var _dashboardHoldMs = 800;
+    var _selectedArticuloIds = {};
 
     // ========== INIT & EVENTS ==========
     function init() {
@@ -92,6 +93,17 @@ var MexClub = (function () {
         $("#searchArticulos").on("input", debounce(function () {
             Articulos.load();
         }, 300));
+        $("#btnArticulosDeleteSelected").on("click", function () {
+            Articulos.deleteSelected();
+        });
+
+        $(document).on("click", ".js-articulo-select", function (e) {
+            e.stopPropagation();
+        });
+        $(document).on("change", ".js-articulo-select", function () {
+            var id = parseInt($(this).data("id"), 10);
+            Articulos.toggleSelected(id, $(this).is(":checked"));
+        });
 
         $("#fichajeCodigo").on("keyup", function (e) {
             if (e.key === "Enter") MexClub.Fichaje.fichar();
@@ -1146,15 +1158,27 @@ var MexClub = (function () {
             }
             if (!items.length) {
                 $("#listArticulosPage").html(emptyState("Sin artículos", "box-seam"));
+                Articulos._syncDeleteSelectedButton();
                 return;
             }
+
+            // Limpia selección de elementos que ya no están en la lista actual.
+            var visibleIds = {};
+            items.forEach(function (a) { visibleIds[a.id] = true; });
+            Object.keys(_selectedArticuloIds).forEach(function (idStr) {
+                if (!visibleIds[idStr]) delete _selectedArticuloIds[idStr];
+            });
+
             var html = items.map(function (a) {
                 var inactive = !a.isActive;
                 var cls = inactive ? ' opacity-50' : '';
+                var selected = !!_selectedArticuloIds[a.id];
+                if (selected) cls += ' articulo-selected';
                 var badge = '<span class="badge bg-primary">' + formatCurrency(a.precio) + '</span> ';
                 if (inactive) badge += '<span class="badge bg-secondary">Inactivo</span>';
                 return '<a class="list-group-item list-group-item-action' + cls + '" data-action="articulo-detail" data-id="' + a.id + '">'
                     + '<div class="d-flex align-items-center gap-2">'
+                    + '<input type="checkbox" class="form-check-input js-articulo-select" data-id="' + a.id + '"' + (selected ? ' checked' : '') + '>'
                     + letterAvatar(a.nombre)
                     + '<div class="flex-grow-1 min-width-0">'
                     + '<div class="fw-semibold text-truncate">' + escapeHtml(a.nombre) + '</div>'
@@ -1164,6 +1188,54 @@ var MexClub = (function () {
                     + '<i class="bi bi-chevron-right text-muted"></i></div></a>';
             }).join("");
             $("#listArticulosPage").html(html);
+            Articulos._syncDeleteSelectedButton();
+        },
+
+        _syncDeleteSelectedButton: function () {
+            var count = Object.keys(_selectedArticuloIds).length;
+            var $btn = $("#btnArticulosDeleteSelected");
+            $btn.toggleClass("d-none", count === 0);
+            if (count > 0) {
+                $btn.html('<i class="bi bi-trash me-1"></i> Eliminar seleccionados (' + count + ')');
+            }
+        },
+
+        toggleSelected: function (id, checked) {
+            if (!(id > 0)) return;
+            if (checked) _selectedArticuloIds[id] = true;
+            else delete _selectedArticuloIds[id];
+            Articulos._syncDeleteSelectedButton();
+            $("#listArticulosPage [data-action='articulo-detail'][data-id='" + id + "']").toggleClass("articulo-selected", !!_selectedArticuloIds[id]);
+        },
+
+        deleteSelected: function () {
+            var ids = Object.keys(_selectedArticuloIds).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; });
+            if (!ids.length) return;
+
+            var body = '<p>¿Seguro que quieres desactivar <strong>' + ids.length + '</strong> artículo(s)?</p>'
+                + '<p class="text-muted small mb-0">Podrás reactivarlos luego desde editar artículo.</p>';
+            var footer = '<button class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>'
+                + '<button class="btn btn-danger" id="btnConfirmDeleteSelectedArticulos">Sí, desactivar</button>';
+            showModal("Eliminar artículos seleccionados", body, footer);
+
+            $(document).off("click.articulos-delete-selected", "#btnConfirmDeleteSelectedArticulos")
+                .on("click.articulos-delete-selected", "#btnConfirmDeleteSelectedArticulos", function () {
+                    Promise.allSettled(ids.map(function (id) { return MexClubApi.deactivateArticulo(id); }))
+                        .then(function (results) {
+                            var ok = results.filter(function (r) { return r.status === "fulfilled" && r.value && r.value.success; }).length;
+                            closeModal();
+                            if (ok > 0) {
+                                showToast("Artículos", "Desactivados: " + ok + " de " + ids.length, "success");
+                            } else {
+                                showToast("Error", "No se pudo desactivar ningún artículo.", "danger");
+                            }
+                            _selectedArticuloIds = {};
+                            Articulos.load();
+                        })
+                        .catch(function () {
+                            showToast("Error", "No se pudieron desactivar los artículos seleccionados.", "danger");
+                        });
+                });
         },
 
         _loadFamiliaFilter: function () {
@@ -2030,14 +2102,48 @@ var MexClub = (function () {
                 + '<div class="badge bg-danger bg-opacity-10 text-danger border border-danger p-2 px-3 rounded-pill"><small class="d-block text-uppercase fw-bold" style="font-size:0.65rem">Consumido</small><span class="fs-6 fw-bold" id="posSocioConsumido">' + Retiradas._formatAcumulado(d.consumicionDelMes || 0) + ' g</span></div>'
                 + '<div class="badge bg-secondary bg-opacity-10 text-secondary border border-secondary p-2 px-3 rounded-pill"><small class="d-block text-uppercase fw-bold" style="font-size:0.65rem">Límite</small><span class="fs-6 fw-bold">' + Retiradas._formatAcumulado(socio.consumicionMaximaMensual || 0) + ' g</span></div>'
                 + '</div>'
+                + '<div class="mt-2" id="posUltimaRetiradaWrap"><small class="text-muted">Cargando última retirada...</small></div>'
                 + '</div>'
                 + '</div>';
 
             $("#posSocioCard").removeClass("d-none").html(html);
             $("#posSocioSearch").closest(".position-relative").addClass("d-none");
+            Retiradas._renderUltimaRetirada(socio.id);
             Retiradas._renderProducts();
             Retiradas._renderCart();
             Retiradas._validate();
+        },
+
+        _renderUltimaRetirada: function (socioId) {
+            var $wrap = $("#posUltimaRetiradaWrap");
+            if (!$wrap.length || !(socioId > 0)) return;
+
+            MexClubApi.getRetiradas(1, 1, socioId).then(function (res) {
+                var items = (res && res.success && res.data && res.data.items) ? res.data.items : [];
+                if (!items.length) {
+                    $wrap.html('<div class="pos-last-retirada"><small class="text-muted">Sin retiradas previas de este socio.</small></div>');
+                    return;
+                }
+
+                var r = items[0];
+                var html = '<div class="pos-last-retirada">'
+                    + '<div class="d-flex justify-content-between align-items-center mb-1">'
+                    + '<small class="text-uppercase fw-semibold text-muted">Última retirada</small>'
+                    + '<small class="text-muted">' + formatDateTime(r.fecha) + '</small>'
+                    + '</div>'
+                    + '<div class="d-flex justify-content-between align-items-center">'
+                    + '<div class="min-width-0">'
+                    + '<div class="fw-semibold text-dark text-truncate">' + escapeHtml(r.articuloNombre || "Artículo") + '</div>'
+                    + '<small class="text-muted">' + Retiradas._formatAcumulado(r.cantidad || 0) + ' g</small>'
+                    + '</div>'
+                    + '<span class="badge rounded-pill text-bg-light border">' + formatCurrency(r.total || 0) + '</span>'
+                    + '</div>'
+                    + '</div>';
+
+                $wrap.html(html);
+            }).catch(function () {
+                $wrap.html('<div class="pos-last-retirada"><small class="text-muted">No se pudo cargar la última retirada.</small></div>');
+            });
         },
 
         _clearSocio: function () {
@@ -2105,10 +2211,22 @@ var MexClub = (function () {
             $("#posSearchProd").val(art.nombre);
             $("#posProdResults").addClass("d-none").html("");
 
-            $("#posFilterFamilia").val(String(art.familiaId || ""));
+            var changedFamilia = Retiradas._syncFamiliaWithSelectedArticulo(art, true);
+            if (changedFamilia) {
+                $("#posSearchProd").val("");
+            }
 
             $("#posSelectedArticle").html('<span class="fw-semibold">Seleccionado:</span> ' + escapeHtml(art.nombre) + ' <span class="text-muted">(' + formatCurrency(art.precio) + '/g)</span>');
             Retiradas._renderProducts();
+        },
+
+        _syncFamiliaWithSelectedArticulo: function (art, forceWhenEmptyOnly) {
+            if (!art) return false;
+            var current = $("#posFilterFamilia").val();
+            if (forceWhenEmptyOnly && current) return false;
+            if (!(art.familiaId > 0)) return false;
+            $("#posFilterFamilia").val(String(art.familiaId));
+            return true;
         },
 
         _renderProducts: function () {
@@ -2155,8 +2273,13 @@ var MexClub = (function () {
             var art = Retiradas._state.articulos.find(function (a) { return a.id === articuloId; });
             if (!art) return;
 
+            var changedFamilia = Retiradas._syncFamiliaWithSelectedArticulo(art, true);
+
             Retiradas._state.selectedArticuloId = art.id;
             $("#posSelectedArticle").html('<span class="fw-semibold">Seleccionado:</span> ' + escapeHtml(art.nombre) + ' <span class="text-muted">(' + formatCurrency(art.precio) + '/g)</span>');
+            if (changedFamilia) {
+                $("#posSearchProd").val("");
+            }
             Retiradas._renderProducts();
         },
 

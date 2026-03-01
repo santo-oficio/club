@@ -246,6 +246,16 @@ html, body {
 .list-group-item .fw-semibold { font-size: 0.88rem; }
 .list-group-item .text-muted { font-size: 0.76rem; }
 
+.articulo-selected {
+    background: linear-gradient(180deg, #f0f7ff 0%, #ffffff 100%);
+    box-shadow: inset 0 0 0 1px rgba(13, 110, 253, 0.2);
+}
+
+.js-articulo-select {
+    margin-top: 2px;
+    flex-shrink: 0;
+}
+
 /* ========== FORMS ========== */
 .form-control, .form-select {
     border-radius: 10px; border: 1px solid var(--border);
@@ -262,6 +272,17 @@ html, body {
 
 /* ========== MODAL ========== */
 .modal-content { border-radius: 16px; }
+
+.dashboard-quick-actions {
+    background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+    border: 1px solid rgba(13, 110, 253, 0.08);
+}
+
+.dashboard-quick-actions .btn {
+    min-height: 46px;
+    border-radius: 12px;
+    font-weight: 600;
+}
 
 /* ========== BADGES ========== */
 .badge-entrada { background: var(--success); }
@@ -527,8 +548,17 @@ body.role-socio .admin-only { display: none !important; }
 }
 
 .pos-product-selected {
-    border-color: var(--primary);
-    box-shadow: 0 0 0 2px rgba(26, 26, 46, 0.16);
+    border-color: #2c7be5;
+    background: linear-gradient(180deg, #f4f8ff 0%, #ffffff 100%);
+    box-shadow: 0 10px 20px rgba(44, 123, 229, 0.18), 0 0 0 2px rgba(44, 123, 229, 0.28);
+    transform: translateY(-2px);
+}
+
+.pos-last-retirada {
+    background: linear-gradient(135deg, #f9fbff 0%, #eef5ff 100%);
+    border: 1px solid rgba(44, 123, 229, 0.2);
+    border-radius: 10px;
+    padding: 0.5rem 0.65rem;
 }
 
 .pos-product-locked {

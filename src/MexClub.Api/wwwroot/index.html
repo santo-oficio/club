@@ -142,6 +142,30 @@
                         </div>
                     </div>
                 </div>
+                <div class="dashboard-quick-actions card mb-3">
+                    <div class="card-header d-flex align-items-center gap-2">
+                        <i class="bi bi-lightning-charge-fill text-warning"></i> Acciones rápidas
+                    </div>
+                    <div class="card-body p-2 p-md-3">
+                        <div class="row g-2">
+                            <div class="col-12 col-md-4">
+                                <button type="button" class="btn btn-primary w-100" onclick="MexClub.Nav.go('pageAportaciones')">
+                                    <i class="bi bi-piggy-bank me-1"></i> Nueva aportación
+                                </button>
+                            </div>
+                            <div class="col-12 col-md-4">
+                                <button type="button" class="btn btn-danger w-100" onclick="MexClub.Retiradas.showCreate()">
+                                    <i class="bi bi-cart-plus me-1"></i> Nueva retirada
+                                </button>
+                            </div>
+                            <div class="col-12 col-md-4">
+                                <button type="button" class="btn btn-success w-100" onclick="MexClub.Nav.go('pageCuotas')">
+                                    <i class="bi bi-calendar-check me-1"></i> Pagar cuota
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
                 <div class="row g-3">
                     <div class="col-md-6">
                         <div class="card h-100">
@@ -223,6 +247,9 @@
                         <input class="form-check-input" type="checkbox" id="articulosToggleActivos" checked>
                         <label class="form-check-label" for="articulosToggleActivos">Solo activos</label>
                     </div>
+                    <button class="btn btn-outline-danger admin-only ms-auto d-none" id="btnArticulosDeleteSelected">
+                        <i class="bi bi-trash me-1"></i> Eliminar seleccionados
+                    </button>
                     <button class="btn btn-primary admin-only ms-auto" data-action="articulo-create">
                         <i class="bi bi-plus-lg me-1"></i> Nuevo Artículo
                     </button>
